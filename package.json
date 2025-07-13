@@ -13,7 +13,11 @@
     "create-admin": "node scripts/create-admin.js",
     "cleanup": "node scripts/cleanup-analytics.js",
     "backup": "node scripts/backup-database.js",
-    "seed": "node scripts/seed-sample-data.js"
+    "seed": "node scripts/seed-sample-data.js",
+    "generate-sitemaps": "node scripts/generate-sitemaps.js",
+    "test-sitemaps": "node scripts/test-sitemaps.js",
+    "validate-sitemaps": "node scripts/validate-sitemaps.js",
+    "test-email": "node scripts/test-email.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -44,7 +48,7 @@
     "sharp": "^0.32.5",
     "slugify": "^1.6.6",
     "socket.io": "^4.7.2",
-    "winston": "^3.10.0",
+    "winston": "^3.17.0",
     "xss": "^1.0.14"
   },
   "devDependencies": {

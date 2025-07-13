@@ -14,6 +14,17 @@ const path = require('path');
 // Load environment variables
 require('dotenv').config();
 
+// Import sitemap routes
+const sitemapRoutes = require('./src/routes/sitemap');
+const sitemapService = require('./src/services/sitemapService');
+
+// This allows sitemap.xml to be served from the root
+app.use('/', sitemapRoutes);
+
+const sitemapService = require('./src/services/sitemapService');
+const cron = require('node-cron');
+
+
 // Initialize Express app
 const app = express();
 const server = createServer(app);
@@ -228,6 +239,71 @@ app.use('*', (req, res) => {
     }
   });
 });
+
+if (process.env.GENERATE_SITEMAPS_ON_START === 'true') {
+  setTimeout(async () => {
+    try {
+      console.log('Generating initial sitemaps...');
+      await sitemapService.generateAllSitemaps();
+      console.log('✅ Sitemaps generated successfully');
+    } catch (error) {
+      console.error('❌ Sitemap generation failed:', error.message);
+      // Don't crash the server
+    }
+  }, 10000); // Wait 10 seconds after server start
+}
+
+// Schedule sitemap generation (runs every hour)
+if (process.env.ENABLE_SITEMAP_CRON === 'true') {
+  cron.schedule('0 * * * *', async () => {
+    try {
+      logger.info('Running scheduled sitemap generation...');
+      await sitemapService.generateAllSitemaps();
+      
+      // Ping search engines if enabled
+      if (process.env.PING_SEARCH_ENGINES === 'true') {
+        await sitemapService.pingSearchEngines();
+      }
+      
+      logger.info('Scheduled sitemap generation completed');
+    } catch (error) {
+      logger.error('Scheduled sitemap generation failed:', error);
+    }
+  });
+  
+  logger.info('Sitemap cron job scheduled to run every hour');
+}
+
+// Clear sitemap cache when articles are published/updated
+// Add this middleware to article routes
+const clearSitemapCacheMiddleware = (req, res, next) => {
+  // Store original res.json
+  const originalJson = res.json;
+  
+  // Override res.json
+  res.json = function(data) {
+    // Clear sitemap cache if operation was successful
+    if (data && data.success) {
+      setTimeout(async () => {
+        try {
+          await sitemapService.clearSitemapCache();
+          logger.info('Sitemap cache cleared after article update');
+        } catch (error) {
+          logger.error('Failed to clear sitemap cache:', error);
+        }
+      }, 1000);
+    }
+    
+    // Call original res.json
+    return originalJson.call(this, data);
+  };
+  
+  next();
+};
+
+// Apply cache clearing middleware to article routes
+// Add this after your article routes definition
+app.use(`${apiPrefix}/articles`, clearSitemapCacheMiddleware);
 
 // Global error handler
 if (errorHandler && typeof errorHandler === 'function') {

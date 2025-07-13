@@ -1,3 +1,4 @@
+// src/config/redis.js - Fixed version with better error handling
 const redis = require('redis');
 const logger = require('../utils/logger');
 
@@ -5,7 +6,13 @@ class RedisClient {
   constructor() {
     this.client = null;
     this.isConnected = false;
-    this.connect();
+    this.isEnabled = process.env.REDIS_ENABLED !== 'false'; // Default to true unless explicitly disabled
+    
+    if (this.isEnabled) {
+      this.connect();
+    } else {
+      logger.info('Redis is disabled, using memory fallback');
+    }
   }
 
   async connect() {
@@ -48,11 +55,13 @@ class RedisClient {
     } catch (error) {
       logger.error('Redis connection error:', error);
       this.isConnected = false;
+      this.isEnabled = false; // Disable Redis if connection fails
+      logger.warn('Redis disabled due to connection failure, using memory fallback');
     }
   }
 
   async get(key) {
-    if (!this.isConnected) return null;
+    if (!this.isConnected || !this.isEnabled) return null;
     try {
       const value = await this.client.get(key);
       return value ? JSON.parse(value) : null;
@@ -63,7 +72,7 @@ class RedisClient {
   }
 
   async set(key, value, expireInSeconds = 3600) {
-    if (!this.isConnected) return false;
+    if (!this.isConnected || !this.isEnabled) return false;
     try {
       const serializedValue = JSON.stringify(value);
       if (expireInSeconds) {
@@ -79,7 +88,7 @@ class RedisClient {
   }
 
   async del(key) {
-    if (!this.isConnected) return false;
+    if (!this.isConnected || !this.isEnabled) return false;
     try {
       await this.client.del(key);
       return true;
@@ -90,7 +99,7 @@ class RedisClient {
   }
 
   async exists(key) {
-    if (!this.isConnected) return false;
+    if (!this.isConnected || !this.isEnabled) return false;
     try {
       const result = await this.client.exists(key);
       return result === 1;
@@ -101,7 +110,7 @@ class RedisClient {
   }
 
   async incr(key, expireInSeconds = 3600) {
-    if (!this.isConnected) return 0;
+    if (!this.isConnected || !this.isEnabled) return 0;
     try {
       const value = await this.client.incr(key);
       if (value === 1 && expireInSeconds) {
@@ -114,8 +123,68 @@ class RedisClient {
     }
   }
 
+  // Cache wrapper for functions with memory fallback
+  async cache(key, fetchFunction, expireInSeconds = 3600) {
+    try {
+      // If Redis is not available, just execute the function
+      if (!this.isConnected || !this.isEnabled) {
+        logger.debug(`Redis not available, executing function directly for key: ${key}`);
+        return await fetchFunction();
+      }
+
+      // Try to get from cache first
+      const cached = await this.get(key);
+      if (cached !== null) {
+        logger.debug(`Cache hit for key: ${key}`);
+        return cached;
+      }
+
+      logger.debug(`Cache miss for key: ${key}, executing function`);
+      
+      // If not in cache, execute function
+      const result = await fetchFunction();
+      
+      // Store in cache (don't wait for it)
+      this.set(key, result, expireInSeconds).catch(error => {
+        logger.error(`Failed to cache result for key ${key}:`, error);
+      });
+      
+      return result;
+    } catch (error) {
+      logger.error('Redis cache error:', error);
+      // If cache fails, just return the function result
+      return await fetchFunction();
+    }
+  }
+
+  // Session storage (with fallback)
+  async setSession(sessionId, data, expireInSeconds = 86400) {
+    return await this.set(`session:${sessionId}`, data, expireInSeconds);
+  }
+
+  async getSession(sessionId) {
+    return await this.get(`session:${sessionId}`);
+  }
+
+  async deleteSession(sessionId) {
+    return await this.del(`session:${sessionId}`);
+  }
+
+  // Rate limiting (with fallback)
+  async isRateLimited(key, limit, windowInSeconds) {
+    if (!this.isConnected || !this.isEnabled) return false;
+    try {
+      const current = await this.incr(key, windowInSeconds);
+      return current > limit;
+    } catch (error) {
+      logger.error('Redis rate limit error:', error);
+      return false;
+    }
+  }
+
+  // Additional helper methods
   async hget(key, field) {
-    if (!this.isConnected) return null;
+    if (!this.isConnected || !this.isEnabled) return null;
     try {
       const value = await this.client.hGet(key, field);
       return value ? JSON.parse(value) : null;
@@ -126,7 +195,7 @@ class RedisClient {
   }
 
   async hset(key, field, value, expireInSeconds = 3600) {
-    if (!this.isConnected) return false;
+    if (!this.isConnected || !this.isEnabled) return false;
     try {
       const serializedValue = JSON.stringify(value);
       await this.client.hSet(key, field, serializedValue);
@@ -141,7 +210,7 @@ class RedisClient {
   }
 
   async hgetall(key) {
-    if (!this.isConnected) return {};
+    if (!this.isConnected || !this.isEnabled) return {};
     try {
       const hash = await this.client.hGetAll(key);
       const result = {};
@@ -160,7 +229,7 @@ class RedisClient {
   }
 
   async sadd(key, ...members) {
-    if (!this.isConnected) return false;
+    if (!this.isConnected || !this.isEnabled) return false;
     try {
       await this.client.sAdd(key, members);
       return true;
@@ -171,7 +240,7 @@ class RedisClient {
   }
 
   async smembers(key) {
-    if (!this.isConnected) return [];
+    if (!this.isConnected || !this.isEnabled) return [];
     try {
       return await this.client.sMembers(key);
     } catch (error) {
@@ -181,7 +250,7 @@ class RedisClient {
   }
 
   async zadd(key, score, member) {
-    if (!this.isConnected) return false;
+    if (!this.isConnected || !this.isEnabled) return false;
     try {
       await this.client.zAdd(key, { score, value: member });
       return true;
@@ -192,7 +261,7 @@ class RedisClient {
   }
 
   async zrevrange(key, start = 0, stop = -1, withScores = false) {
-    if (!this.isConnected) return [];
+    if (!this.isConnected || !this.isEnabled) return [];
     try {
       if (withScores) {
         return await this.client.zRevRangeWithScores(key, start, stop);
@@ -205,7 +274,7 @@ class RedisClient {
   }
 
   async flushall() {
-    if (!this.isConnected) return false;
+    if (!this.isConnected || !this.isEnabled) return false;
     try {
       await this.client.flushAll();
       return true;
@@ -216,7 +285,7 @@ class RedisClient {
   }
 
   async expire(key, seconds) {
-    if (!this.isConnected) return false;
+    if (!this.isConnected || !this.isEnabled) return false;
     try {
       await this.client.expire(key, seconds);
       return true;
@@ -227,7 +296,7 @@ class RedisClient {
   }
 
   async ttl(key) {
-    if (!this.isConnected) return -1;
+    if (!this.isConnected || !this.isEnabled) return -1;
     try {
       return await this.client.ttl(key);
     } catch (error) {
@@ -236,52 +305,13 @@ class RedisClient {
     }
   }
 
-  // Cache wrapper for functions
-  async cache(key, fetchFunction, expireInSeconds = 3600) {
-    try {
-      // Try to get from cache first
-      const cached = await this.get(key);
-      if (cached !== null) {
-        return cached;
-      }
-
-      // If not in cache, execute function
-      const result = await fetchFunction();
-      
-      // Store in cache
-      await this.set(key, result, expireInSeconds);
-      
-      return result;
-    } catch (error) {
-      logger.error('Redis cache error:', error);
-      // If cache fails, just return the function result
-      return await fetchFunction();
-    }
-  }
-
-  // Rate limiting
-  async isRateLimited(key, limit, windowInSeconds) {
-    if (!this.isConnected) return false;
-    try {
-      const current = await this.incr(key, windowInSeconds);
-      return current > limit;
-    } catch (error) {
-      logger.error('Redis rate limit error:', error);
-      return false;
-    }
-  }
-
-  // Session storage
-  async setSession(sessionId, data, expireInSeconds = 86400) {
-    return await this.set(`session:${sessionId}`, data, expireInSeconds);
-  }
-
-  async getSession(sessionId) {
-    return await this.get(`session:${sessionId}`);
-  }
-
-  async deleteSession(sessionId) {
-    return await this.del(`session:${sessionId}`);
+  // Get Redis status
+  getStatus() {
+    return {
+      enabled: this.isEnabled,
+      connected: this.isConnected,
+      client: !!this.client
+    };
   }
 
   async close() {
