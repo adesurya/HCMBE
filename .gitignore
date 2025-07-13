@@ -2,6 +2,11 @@ node_modules/
 database/
 logs/
 tests/
+scripts/
 API.md
 README.md
 .env
+setup.js
+database-schema.sql
+start.js
+diagnose.js

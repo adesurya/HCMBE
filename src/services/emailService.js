@@ -6,7 +6,8 @@ const logger = require('../utils/logger');
 
 class EmailService {
   constructor() {
-    this.transporter = nodemailer.createTransporter({
+    // Fix: Use createTransport, not createTransporter
+    this.transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT),
       secure: process.env.SMTP_PORT === '465',
@@ -83,16 +84,16 @@ class EmailService {
       <body>
         <div class="container">
           <div class="header">
-            <h1>${this.siteName}</h1>
+            <h1>${this.siteName || 'News Portal'}</h1>
           </div>
           <div class="content">
             ${variables.content || 'Thank you for using our service.'}
           </div>
           <div class="footer">
-            <p>&copy; ${new Date().getFullYear()} ${this.siteName}. All rights reserved.</p>
+            <p>&copy; ${new Date().getFullYear()} ${this.siteName || 'News Portal'}. All rights reserved.</p>
             <p>
-              <a href="${this.siteUrl}">Visit our website</a> | 
-              <a href="${this.siteUrl}/unsubscribe">Unsubscribe</a>
+              <a href="${this.siteUrl || '#'}">Visit our website</a> | 
+              <a href="${this.siteUrl || '#'}/unsubscribe">Unsubscribe</a>
             </p>
           </div>
         </div>
@@ -105,7 +106,7 @@ class EmailService {
   async sendEmail(to, subject, html, text = null) {
     try {
       const mailOptions = {
-        from: `${this.fromName} <${this.fromEmail}>`,
+        from: `${this.fromName || 'News Portal'} <${this.fromEmail || 'noreply@example.com'}>`,
         to,
         subject,
         html,
@@ -124,7 +125,7 @@ class EmailService {
   // Convert HTML to plain text (basic)
   htmlToText(html) {
     return html
-      .replace(/<[^>]*>/g, '')
+      .replace(/<[^>]*>/g, '') // Remove HTML tags
       .replace(/&nbsp;/g, ' ')
       .replace(/&amp;/g, '&')
       .replace(/&lt;/g, '<')
@@ -139,7 +140,15 @@ class EmailService {
     
     const html = await this.loadTemplate('verification', {
       verification_url: verificationUrl,
-      subject: 'Verify Your Email Address'
+      subject: 'Verify Your Email Address',
+      content: `
+        <h2>Welcome to ${this.siteName}!</h2>
+        <p>Thank you for signing up. Please verify your email address by clicking the button below:</p>
+        <a href="${verificationUrl}" class="button">Verify Email Address</a>
+        <p>If the button doesn't work, you can also copy and paste this link into your browser:</p>
+        <p><a href="${verificationUrl}">${verificationUrl}</a></p>
+        <p>This link will expire in 24 hours.</p>
+      `
     });
 
     await this.sendEmail(
@@ -155,7 +164,16 @@ class EmailService {
     
     const html = await this.loadTemplate('password-reset', {
       reset_url: resetUrl,
-      subject: 'Reset Your Password'
+      subject: 'Reset Your Password',
+      content: `
+        <h2>Password Reset Request</h2>
+        <p>We received a request to reset your password. Click the button below to reset it:</p>
+        <a href="${resetUrl}" class="button">Reset Password</a>
+        <p>If the button doesn't work, you can also copy and paste this link into your browser:</p>
+        <p><a href="${resetUrl}">${resetUrl}</a></p>
+        <p>This link will expire in 10 minutes.</p>
+        <p>If you didn't request a password reset, please ignore this email.</p>
+      `
     });
 
     await this.sendEmail(
@@ -170,7 +188,13 @@ class EmailService {
     const html = await this.loadTemplate('welcome', {
       user_name: user.first_name || user.username,
       dashboard_url: `${this.siteUrl}/dashboard`,
-      subject: `Welcome to ${this.siteName}!`
+      subject: `Welcome to ${this.siteName}!`,
+      content: `
+        <h2>Welcome to ${this.siteName}, ${user.first_name || user.username}!</h2>
+        <p>Your account has been successfully created. You can now start exploring our platform.</p>
+        <a href="${this.siteUrl}/dashboard" class="button">Go to Dashboard</a>
+        <p>If you have any questions, feel free to contact our support team.</p>
+      `
     });
 
     await this.sendEmail(
@@ -197,7 +221,15 @@ class EmailService {
           article_title: article.title,
           article_author: article.author?.username || 'Unknown',
           approval_url: approvalUrl,
-          subject: 'Article Pending Approval'
+          subject: 'Article Pending Approval',
+          content: `
+            <h2>Article Pending Approval</h2>
+            <p>Hello ${editor.first_name || editor.username},</p>
+            <p>A new article is waiting for your approval:</p>
+            <p><strong>Title:</strong> ${article.title}</p>
+            <p><strong>Author:</strong> ${article.author?.username || 'Unknown'}</p>
+            <a href="${approvalUrl}" class="button">Review Article</a>
+          `
         });
 
         await this.sendEmail(
@@ -219,7 +251,13 @@ class EmailService {
     const html = await this.loadTemplate('approval-confirmation', {
       article_title: article.title,
       article_url: articleUrl,
-      subject: 'Your Article Has Been Published'
+      subject: 'Your Article Has Been Published',
+      content: `
+        <h2>Congratulations!</h2>
+        <p>Your article "${article.title}" has been approved and published.</p>
+        <a href="${articleUrl}" class="button">View Published Article</a>
+        <p>Thank you for your contribution to ${this.siteName}!</p>
+      `
     });
 
     await this.sendEmail(
@@ -237,7 +275,14 @@ class EmailService {
       article_title: article.title,
       rejection_reason: reason,
       edit_url: editUrl,
-      subject: 'Article Requires Revision'
+      subject: 'Article Requires Revision',
+      content: `
+        <h2>Article Requires Revision</h2>
+        <p>Your article "${article.title}" needs some revisions before it can be published.</p>
+        ${reason ? `<p><strong>Reason:</strong> ${reason}</p>` : ''}
+        <a href="${editUrl}" class="button">Edit Article</a>
+        <p>Please make the necessary changes and resubmit for approval.</p>
+      `
     });
 
     await this.sendEmail(
@@ -259,7 +304,16 @@ class EmailService {
         comment_author: comment.author_name || comment.user?.username || 'Anonymous',
         comment_content: comment.content.substring(0, 200) + (comment.content.length > 200 ? '...' : ''),
         article_url: articleUrl,
-        subject: 'New Comment on Your Article'
+        subject: 'New Comment on Your Article',
+        content: `
+          <h2>New Comment on Your Article</h2>
+          <p>Someone commented on your article "${article.title}":</p>
+          <blockquote style="border-left: 4px solid #3498db; padding-left: 15px; margin: 15px 0;">
+            ${comment.content.substring(0, 200)}${comment.content.length > 200 ? '...' : ''}
+          </blockquote>
+          <p><strong>By:</strong> ${comment.author_name || comment.user?.username || 'Anonymous'}</p>
+          <a href="${articleUrl}" class="button">View Comment</a>
+        `
       });
 
       await this.sendEmail(
@@ -286,7 +340,21 @@ class EmailService {
         reply_content: reply.content.substring(0, 200) + (reply.content.length > 200 ? '...' : ''),
         article_title: article.title,
         article_url: articleUrl,
-        subject: 'Reply to Your Comment'
+        subject: 'Reply to Your Comment',
+        content: `
+          <h2>Someone Replied to Your Comment</h2>
+          <p>You received a reply on the article "${article.title}":</p>
+          <p><strong>Your comment:</strong></p>
+          <blockquote style="border-left: 4px solid #95a5a6; padding-left: 15px; margin: 15px 0;">
+            ${parentComment.content.substring(0, 100)}...
+          </blockquote>
+          <p><strong>Reply:</strong></p>
+          <blockquote style="border-left: 4px solid #3498db; padding-left: 15px; margin: 15px 0;">
+            ${reply.content.substring(0, 200)}${reply.content.length > 200 ? '...' : ''}
+          </blockquote>
+          <p><strong>By:</strong> ${reply.author_name || reply.user?.username || 'Anonymous'}</p>
+          <a href="${articleUrl}" class="button">View Reply</a>
+        `
       });
 
       await this.sendEmail(
@@ -299,231 +367,34 @@ class EmailService {
     }
   }
 
-  // Send weekly newsletter
-  async sendWeeklyNewsletter(subscribers, articles) {
-    try {
-      const html = await this.loadTemplate('newsletter', {
-        articles: articles.map(article => ({
-          title: article.title,
-          excerpt: article.excerpt,
-          url: `${this.siteUrl}/articles/${article.slug}`,
-          author: article.author?.username || 'Unknown',
-          published_date: new Date(article.published_at).toLocaleDateString()
-        })),
-        subject: `Weekly Newsletter - ${this.siteName}`
-      });
-
-      // Send to subscribers in batches
-      const batchSize = 50;
-      for (let i = 0; i < subscribers.length; i += batchSize) {
-        const batch = subscribers.slice(i, i + batchSize);
-        
-        const promises = batch.map(subscriber => 
-          this.sendEmail(
-            subscriber.email,
-            `Weekly Newsletter - ${this.siteName}`,
-            html
-          ).catch(error => {
-            logger.error(`Failed to send newsletter to ${subscriber.email}:`, error);
-          })
-        );
-
-        await Promise.all(promises);
-        
-        // Wait between batches to avoid rate limiting
-        if (i + batchSize < subscribers.length) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-      }
-    } catch (error) {
-      logger.error('Failed to send newsletter:', error);
-      throw error;
-    }
-  }
-
-  // Send user role change notification
-  async sendRoleChangeNotification(user, oldRole, newRole) {
-    const html = await this.loadTemplate('role-change', {
-      user_name: user.first_name || user.username,
-      old_role: oldRole,
-      new_role: newRole,
-      dashboard_url: `${this.siteUrl}/dashboard`,
-      subject: 'Your Account Role Has Been Updated'
-    });
-
-    await this.sendEmail(
-      user.email,
-      'Your Account Role Has Been Updated',
-      html
-    );
-  }
-
-  // Send account deactivation notification
-  async sendAccountDeactivationNotification(email, reason = '') {
-    const html = await this.loadTemplate('account-deactivation', {
-      reason: reason,
-      contact_url: `${this.siteUrl}/contact`,
-      subject: 'Account Deactivated'
-    });
-
-    await this.sendEmail(
-      email,
-      'Account Deactivated',
-      html
-    );
-  }
-
-  // Send bulk email
-  async sendBulkEmail(recipients, subject, template, variables = {}) {
-    try {
-      const html = await this.loadTemplate(template, variables);
-      const batchSize = 50;
-      let sent = 0;
-      let failed = 0;
-
-      for (let i = 0; i < recipients.length; i += batchSize) {
-        const batch = recipients.slice(i, i + batchSize);
-        
-        const promises = batch.map(async (recipient) => {
-          try {
-            await this.sendEmail(recipient.email, subject, html);
-            sent++;
-          } catch (error) {
-            failed++;
-            logger.error(`Failed to send email to ${recipient.email}:`, error);
-          }
-        });
-
-        await Promise.all(promises);
-        
-        // Wait between batches
-        if (i + batchSize < recipients.length) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-      }
-
-      return { sent, failed, total: recipients.length };
-    } catch (error) {
-      logger.error('Failed to send bulk email:', error);
-      throw error;
-    }
-  }
-
-  // Send system maintenance notification
-  async sendMaintenanceNotification(users, maintenanceInfo) {
-    const html = await this.loadTemplate('maintenance', {
-      maintenance_start: maintenanceInfo.startTime,
-      maintenance_end: maintenanceInfo.endTime,
-      maintenance_reason: maintenanceInfo.reason,
-      estimated_duration: maintenanceInfo.duration,
-      subject: 'Scheduled System Maintenance'
-    });
-
-    return await this.sendBulkEmail(
-      users,
-      'Scheduled System Maintenance',
-      'maintenance',
-      {
-        maintenance_start: maintenanceInfo.startTime,
-        maintenance_end: maintenanceInfo.endTime,
-        maintenance_reason: maintenanceInfo.reason,
-        estimated_duration: maintenanceInfo.duration
-      }
-    );
-  }
-
-  // Send security alert
-  async sendSecurityAlert(email, alertInfo) {
-    const html = await this.loadTemplate('security-alert', {
-      alert_type: alertInfo.type,
-      alert_time: alertInfo.timestamp,
-      ip_address: alertInfo.ipAddress,
-      user_agent: alertInfo.userAgent,
-      action_taken: alertInfo.action,
-      secure_account_url: `${this.siteUrl}/security`,
-      subject: 'Security Alert - Suspicious Activity Detected'
-    });
-
-    await this.sendEmail(
-      email,
-      'Security Alert - Suspicious Activity Detected',
-      html
-    );
-  }
-
-  // Send digest email (daily/weekly summary)
-  async sendDigestEmail(user, digestData, period = 'weekly') {
-    const html = await this.loadTemplate('digest', {
-      user_name: user.first_name || user.username,
-      period: period,
-      total_articles: digestData.totalArticles,
-      total_views: digestData.totalViews,
-      total_comments: digestData.totalComments,
-      top_articles: digestData.topArticles,
-      dashboard_url: `${this.siteUrl}/dashboard`,
-      subject: `Your ${period.charAt(0).toUpperCase() + period.slice(1)} Digest`
-    });
-
-    await this.sendEmail(
-      user.email,
-      `Your ${period.charAt(0).toUpperCase() + period.slice(1)} Digest`,
-      html
-    );
-  }
-
-  // Send article mention notification
-  async sendMentionNotification(mentionedUser, article, mentionContext) {
-    const articleUrl = `${this.siteUrl}/articles/${article.slug}`;
-    
-    const html = await this.loadTemplate('mention-notification', {
-      mentioned_user: mentionedUser.first_name || mentionedUser.username,
-      article_title: article.title,
-      article_author: article.author?.username || 'Unknown',
-      mention_context: mentionContext,
-      article_url: articleUrl,
-      subject: 'You Were Mentioned in an Article'
-    });
-
-    await this.sendEmail(
-      mentionedUser.email,
-      'You Were Mentioned in an Article',
-      html
-    );
-  }
-
   // Test email configuration
   async testEmailConfiguration() {
     try {
+      const testEmail = process.env.ADMIN_EMAIL || this.fromEmail;
+      
       await this.sendEmail(
-        process.env.ADMIN_EMAIL || this.fromEmail,
+        testEmail,
         'Email Configuration Test',
-        '<h1>Email Test</h1><p>If you receive this email, your email configuration is working correctly.</p>'
+        this.getDefaultTemplate({
+          subject: 'Email Configuration Test',
+          content: `
+            <h2>Email Test Successful!</h2>
+            <p>If you receive this email, your email configuration is working correctly.</p>
+            <p><strong>Test Details:</strong></p>
+            <ul>
+              <li>SMTP Host: ${process.env.SMTP_HOST}</li>
+              <li>SMTP Port: ${process.env.SMTP_PORT}</li>
+              <li>From Email: ${this.fromEmail}</li>
+              <li>Test Time: ${new Date().toISOString()}</li>
+            </ul>
+          `
+        })
       );
       
       return { success: true, message: 'Test email sent successfully' };
     } catch (error) {
       logger.error('Email configuration test failed:', error);
       return { success: false, error: error.message };
-    }
-  }
-
-  // Get email statistics
-  async getEmailStats() {
-    try {
-      // This would typically come from a database or email service provider
-      return {
-        totalSent: 0,
-        totalDelivered: 0,
-        totalBounced: 0,
-        totalOpened: 0,
-        totalClicked: 0,
-        deliveryRate: 0,
-        openRate: 0,
-        clickRate: 0
-      };
-    } catch (error) {
-      logger.error('Failed to get email statistics:', error);
-      throw error;
     }
   }
 
