@@ -1,0 +1,7 @@
+node_modules/
+database/
+logs/
+tests/
+API.md
+README.md
+.env
