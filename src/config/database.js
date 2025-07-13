@@ -1,6 +1,6 @@
 // src/config/database.js
 const mysql = require('mysql2');
-const logger = require('../utils/logger');
+const logger = require('../../scripts/baksrc/utils/logger');
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',

@@ -1,14 +1,28 @@
-// src/services/authService.js
+// src/services/authService.js - Enhanced with OTP functionality
 const User = require('../models/User');
 const redis = require('../config/redis');
 const crypto = require('crypto');
-const logger = require('../utils/logger');
+const logger = require('../../scripts/baksrc/utils/logger');
 
 class AuthService {
   constructor() {
     this.loginAttempts = new Map(); // In-memory store for demo, use Redis in production
     this.maxLoginAttempts = 5;
     this.lockoutDuration = 15 * 60; // 15 minutes
+    this.otpLength = 6;
+    this.otpValidityDuration = 600; // 10 minutes
+  }
+
+  // Generate OTP
+  generateOTP(length = this.otpLength) {
+    const digits = '0123456789';
+    let otp = '';
+    
+    for (let i = 0; i < length; i++) {
+      otp += digits[Math.floor(Math.random() * digits.length)];
+    }
+    
+    return otp;
   }
 
   // Check if account is locked
@@ -54,7 +68,7 @@ class AuthService {
     await redis.del(key);
   }
 
-  // Validate login attempt
+  // Validate login attempt (Step 1 - Username/Password only)
   async validateLoginAttempt(email, password, ip) {
     // Check if account is locked
     if (await this.isAccountLocked(email)) {
@@ -73,6 +87,11 @@ class AuthService {
       throw new Error('Account is deactivated');
     }
 
+    // Check if email is verified
+    if (!user.email_verified) {
+      throw new Error('Please verify your email address before logging in');
+    }
+
     // Verify password
     const isValidPassword = await user.verifyPassword(password);
     if (!isValidPassword) {
@@ -83,10 +102,85 @@ class AuthService {
       throw new Error('Invalid email or password');
     }
 
-    // Clear failed attempts on successful login
+    // Clear failed attempts on successful password verification
     await this.clearFailedAttempts(email);
 
     return user;
+  }
+
+  // Store OTP session data
+  async storeOTPSession(userId, email, otp, sessionToken) {
+    const sessionData = {
+      userId,
+      email,
+      otp,
+      attempts: 0,
+      maxAttempts: 3,
+      resendCount: 0,
+      maxResends: 3,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + this.otpValidityDuration * 1000).toISOString()
+    };
+
+    await redis.set(`otp:${sessionToken}`, JSON.stringify(sessionData), this.otpValidityDuration);
+    return sessionData;
+  }
+
+  // Validate OTP
+  async validateOTP(sessionToken, inputOTP) {
+    const sessionDataString = await redis.get(`otp:${sessionToken}`);
+    if (!sessionDataString) {
+      throw new Error('Invalid or expired verification session');
+    }
+
+    const sessionData = JSON.parse(sessionDataString);
+
+    // Check if max attempts exceeded
+    if (sessionData.attempts >= sessionData.maxAttempts) {
+      await redis.del(`otp:${sessionToken}`);
+      throw new Error('Maximum verification attempts exceeded. Please request a new code.');
+    }
+
+    // Check if OTP matches
+    if (sessionData.otp !== inputOTP.toString()) {
+      sessionData.attempts += 1;
+      await redis.set(`otp:${sessionToken}`, JSON.stringify(sessionData), this.otpValidityDuration);
+      
+      const remainingAttempts = sessionData.maxAttempts - sessionData.attempts;
+      throw new Error(`Invalid verification code. ${remainingAttempts} attempts remaining.`);
+    }
+
+    // OTP is valid
+    await redis.del(`otp:${sessionToken}`);
+    return sessionData;
+  }
+
+  // Resend OTP
+  async resendOTP(sessionToken) {
+    const sessionDataString = await redis.get(`otp:${sessionToken}`);
+    if (!sessionDataString) {
+      throw new Error('Invalid or expired verification session');
+    }
+
+    const sessionData = JSON.parse(sessionDataString);
+
+    // Check if max resends exceeded
+    if (sessionData.resendCount >= sessionData.maxResends) {
+      throw new Error('Maximum resend attempts exceeded. Please start the login process again.');
+    }
+
+    // Generate new OTP
+    const newOTP = this.generateOTP();
+    
+    // Update session data
+    sessionData.otp = newOTP;
+    sessionData.attempts = 0;
+    sessionData.resendCount += 1;
+    sessionData.lastResentAt = new Date().toISOString();
+
+    await redis.set(`otp:${sessionToken}`, JSON.stringify(sessionData), this.otpValidityDuration);
+
+    return { newOTP, sessionData };
   }
 
   // Generate secure tokens
@@ -159,6 +253,54 @@ class AuthService {
     return 'very_strong';
   }
 
+  // Get user permissions based on role
+  getUserPermissions(role) {
+    const permissions = {
+      admin: {
+        articles: ['create', 'read', 'update', 'delete', 'approve', 'schedule'],
+        users: ['create', 'read', 'update', 'delete', 'manage_roles'],
+        categories: ['create', 'read', 'update', 'delete'],
+        tags: ['create', 'read', 'update', 'delete'],
+        comments: ['read', 'approve', 'delete'],
+        media: ['upload', 'read', 'delete'],
+        ads: ['create', 'read', 'update', 'delete'],
+        analytics: ['read', 'export']
+      },
+      editor: {
+        articles: ['create', 'read', 'update', 'delete', 'approve', 'schedule'],
+        users: ['read'],
+        categories: ['create', 'read', 'update'],
+        tags: ['create', 'read', 'update'],
+        comments: ['read', 'approve', 'delete'],
+        media: ['upload', 'read', 'delete'],
+        ads: ['read'],
+        analytics: ['read']
+      },
+      journalist: {
+        articles: ['create', 'read', 'update_own'],
+        users: ['read_profile'],
+        categories: ['read'],
+        tags: ['read'],
+        comments: ['read'],
+        media: ['upload', 'read_own'],
+        ads: ['read'],
+        analytics: ['read_own']
+      },
+      user: {
+        articles: ['read'],
+        users: ['read_profile'],
+        categories: ['read'],
+        tags: ['read'],
+        comments: ['create', 'read'],
+        media: ['read'],
+        ads: ['read'],
+        analytics: []
+      }
+    };
+
+    return permissions[role] || permissions.user;
+  }
+
   // Session management
   async createSession(userId, deviceInfo = {}) {
     const sessionId = this.generateSecureToken();
@@ -229,50 +371,11 @@ class AuthService {
     };
   }
 
-  // Two-factor authentication setup
-  async setupTwoFactorAuth(userId) {
-    // Generate backup codes
-    const backupCodes = [];
-    for (let i = 0; i < 10; i++) {
-      backupCodes.push(this.generateSecureToken(8));
-    }
-
-    // Store backup codes (hashed)
-    const hashedCodes = backupCodes.map(code => 
-      crypto.createHash('sha256').update(code).digest('hex')
-    );
-
-    await redis.set(`2fa_backup:${userId}`, hashedCodes, 365 * 24 * 60 * 60); // 1 year
-
-    return {
-      backupCodes,
-      setupComplete: true
-    };
-  }
-
-  // Validate two-factor code
-  async validateTwoFactorCode(userId, code) {
-    // Check backup codes
-    const backupCodes = await redis.get(`2fa_backup:${userId}`) || [];
-    const hashedCode = crypto.createHash('sha256').update(code).digest('hex');
-
-    const codeIndex = backupCodes.indexOf(hashedCode);
-    if (codeIndex !== -1) {
-      // Remove used backup code
-      backupCodes.splice(codeIndex, 1);
-      await redis.set(`2fa_backup:${userId}`, backupCodes, 365 * 24 * 60 * 60);
-      return true;
-    }
-
-    // Here you would validate TOTP codes if implementing app-based 2FA
-    return false;
-  }
-
   // Password reset flow
   async initiatePasswordReset(email) {
     const user = await User.findByEmail(email);
     if (!user) {
-      // Don't reveal if email exists
+      // Don't reveal if email exists or not
       return { success: true };
     }
 
@@ -325,6 +428,39 @@ class AuthService {
     await redis.del(`reset_meta:${token}`);
 
     return { success: true };
+  }
+
+  // Get OTP session status
+  async getOTPSessionStatus(sessionToken) {
+    const sessionDataString = await redis.get(`otp:${sessionToken}`);
+    if (!sessionDataString) {
+      return null;
+    }
+
+    const sessionData = JSON.parse(sessionDataString);
+    const now = new Date();
+    const expiresAt = new Date(sessionData.expiresAt);
+    const timeRemaining = Math.max(0, Math.floor((expiresAt - now) / 1000));
+
+    return {
+      isValid: timeRemaining > 0,
+      timeRemaining,
+      attemptsRemaining: sessionData.maxAttempts - sessionData.attempts,
+      resendsRemaining: sessionData.maxResends - sessionData.resendCount,
+      email: sessionData.email
+    };
+  }
+
+  // Clean expired OTP sessions
+  async cleanExpiredOTPSessions() {
+    // This would be called by a cron job
+    // Implementation depends on Redis pattern matching capabilities
+    logger.info('Cleaning expired OTP sessions');
+  }
+
+  // Log security events
+  logSecurityEvent(eventType, details) {
+    logger.security[eventType] && logger.security[eventType](details);
   }
 }
 

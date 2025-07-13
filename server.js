@@ -31,7 +31,7 @@ let db, logger, errorHandler;
 
 try {
   db = require('./src/config/database');
-  logger = require('./src/utils/logger');
+  logger = require('./scripts/baksrc/utils/logger');
   errorHandler = require('./src/middleware/errorHandler');
 } catch (error) {
   console.error('❌ Failed to load core dependencies:', error.message);

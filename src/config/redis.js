@@ -1,6 +1,6 @@
 // src/config/redis.js - Fixed version with better error handling
 const redis = require('redis');
-const logger = require('../utils/logger');
+const logger = require('../../scripts/baksrc/utils/logger');
 
 class RedisClient {
   constructor() {

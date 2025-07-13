@@ -1,7 +1,7 @@
 // src/controllers/adsController.js
 const Ads = require('../models/Ads');
 const { AppError, asyncHandler } = require('../middleware/errorHandler');
-const logger = require('../utils/logger');
+const logger = require('../../scripts/baksrc/utils/logger');
 
 // Get all ads
 const getAds = asyncHandler(async (req, res) => {

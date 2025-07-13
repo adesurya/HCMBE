@@ -1,11 +1,211 @@
-// src/controllers/authController.js
+// src/controllers/authController.js - Enhanced with OTP
 const User = require('../models/User');
 const { AppError, asyncHandler } = require('../middleware/errorHandler');
 const emailService = require('../services/emailService');
-const logger = require('../utils/logger');
+const authService = require('../services/authService');
+const redis = require('../config/redis');
+const logger = require('../../scripts/baksrc/utils/logger');
 const crypto = require('crypto');
 
-// Register new user
+// Step 1: Initial login (username/password verification)
+const login = asyncHandler(async (req, res) => {
+  const { email, password } = req.body;
+
+  // Validate credentials using auth service
+  const user = await authService.validateLoginAttempt(email, password, req.ip);
+
+  // Generate OTP and store temporarily
+  const otp = authService.generateOTP();
+  const otpToken = crypto.randomBytes(32).toString('hex');
+  
+  // Store OTP data in Redis (expires in 10 minutes)
+  await redis.set(`otp:${otpToken}`, JSON.stringify({
+    userId: user.id,
+    email: user.email,
+    otp: otp,
+    attempts: 0,
+    maxAttempts: 3,
+    createdAt: new Date().toISOString()
+  }), 600); // 10 minutes
+
+  // Send OTP via email
+  try {
+    await emailService.sendOTPEmail(user.email, otp, user.first_name || user.username);
+    
+    logger.info('OTP sent for login', {
+      userId: user.id,
+      email: user.email,
+      ip: req.ip
+    });
+  } catch (error) {
+    logger.error('Failed to send OTP email:', error);
+    throw new AppError('Failed to send verification code. Please try again.', 500);
+  }
+
+  res.json({
+    success: true,
+    message: 'Verification code sent to your email. Please check your inbox.',
+    data: {
+      otpToken,
+      email: user.email.replace(/(.{2})(.*)(@.*)/, '$1***$3'), // Masked email
+      expiresIn: 600 // 10 minutes
+    }
+  });
+});
+
+// Step 2: Verify OTP and complete login
+const verifyOTPAndLogin = asyncHandler(async (req, res) => {
+  const { otpToken, otp } = req.body;
+
+  if (!otpToken || !otp) {
+    throw new AppError('OTP token and verification code are required', 400);
+  }
+
+  // Get OTP data from Redis
+  const otpDataString = await redis.get(`otp:${otpToken}`);
+  if (!otpDataString) {
+    throw new AppError('Invalid or expired verification code', 400);
+  }
+
+  const otpData = JSON.parse(otpDataString);
+  
+  // Check if max attempts exceeded
+  if (otpData.attempts >= otpData.maxAttempts) {
+    await redis.del(`otp:${otpToken}`);
+    throw new AppError('Maximum verification attempts exceeded. Please request a new code.', 400);
+  }
+
+  // Verify OTP
+  if (otpData.otp !== otp.toString()) {
+    // Increment attempts
+    otpData.attempts += 1;
+    await redis.set(`otp:${otpToken}`, JSON.stringify(otpData), 600);
+    
+    const remainingAttempts = otpData.maxAttempts - otpData.attempts;
+    
+    logger.warn('Invalid OTP attempt', {
+      userId: otpData.userId,
+      attempts: otpData.attempts,
+      ip: req.ip
+    });
+    
+    throw new AppError(
+      `Invalid verification code. ${remainingAttempts} attempts remaining.`, 
+      400
+    );
+  }
+
+  // OTP is valid, get user and complete login
+  const user = await User.findById(otpData.userId);
+  if (!user || !user.is_active) {
+    await redis.del(`otp:${otpToken}`);
+    throw new AppError('User not found or inactive', 401);
+  }
+
+  // Update last login
+  await user.updateLastLogin();
+
+  // Generate JWT tokens
+  const token = user.generateToken();
+  const refreshToken = user.generateRefreshToken();
+
+  // Set refresh token cookie
+  res.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+  });
+
+  // Clean up OTP data
+  await redis.del(`otp:${otpToken}`);
+
+  // Log successful login
+  logger.info('Successful login with OTP', {
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+    ip: req.ip
+  });
+
+  res.json({
+    success: true,
+    message: 'Login successful',
+    data: {
+      user: user.toSafeObject(),
+      token,
+      permissions: authService.getUserPermissions(user.role)
+    }
+  });
+});
+
+// Resend OTP
+const resendOTP = asyncHandler(async (req, res) => {
+  const { otpToken } = req.body;
+
+  if (!otpToken) {
+    throw new AppError('OTP token is required', 400);
+  }
+
+  // Get existing OTP data
+  const otpDataString = await redis.get(`otp:${otpToken}`);
+  if (!otpDataString) {
+    throw new AppError('Invalid or expired session. Please start login again.', 400);
+  }
+
+  const otpData = JSON.parse(otpDataString);
+  
+  // Check rate limiting for resend (max 3 resends per session)
+  const resendCount = otpData.resendCount || 0;
+  if (resendCount >= 3) {
+    throw new AppError('Maximum resend attempts exceeded. Please start login again.', 400);
+  }
+
+  // Generate new OTP
+  const newOTP = authService.generateOTP();
+  
+  // Update OTP data
+  const updatedOtpData = {
+    ...otpData,
+    otp: newOTP,
+    attempts: 0,
+    resendCount: resendCount + 1,
+    lastResent: new Date().toISOString()
+  };
+
+  await redis.set(`otp:${otpToken}`, JSON.stringify(updatedOtpData), 600);
+
+  // Get user for email
+  const user = await User.findById(otpData.userId);
+  if (!user) {
+    throw new AppError('User not found', 404);
+  }
+
+  // Send new OTP
+  try {
+    await emailService.sendOTPEmail(user.email, newOTP, user.first_name || user.username);
+    
+    logger.info('OTP resent', {
+      userId: user.id,
+      resendCount: updatedOtpData.resendCount,
+      ip: req.ip
+    });
+  } catch (error) {
+    logger.error('Failed to resend OTP:', error);
+    throw new AppError('Failed to send verification code. Please try again.', 500);
+  }
+
+  res.json({
+    success: true,
+    message: 'New verification code sent to your email',
+    data: {
+      resendCount: updatedOtpData.resendCount,
+      remainingResends: 3 - updatedOtpData.resendCount
+    }
+  });
+});
+
+// Register new user (existing code with OTP verification)
 const register = asyncHandler(async (req, res) => {
   const { username, email, password, first_name, last_name, role } = req.body;
 
@@ -32,70 +232,11 @@ const register = asyncHandler(async (req, res) => {
     logger.error('Failed to send verification email:', error);
   }
 
-  // Generate tokens
-  const token = user.generateToken();
-  const refreshToken = user.generateRefreshToken();
-
-  // Set cookie for refresh token
-  res.cookie('refreshToken', refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-  });
-
   res.status(201).json({
     success: true,
-    message: 'User registered successfully. Please check your email for verification.',
+    message: 'User registered successfully. Please check your email for verification before logging in.',
     data: {
-      user: user.toSafeObject(),
-      token
-    }
-  });
-});
-
-// Login user
-const login = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
-
-  // Find user by email
-  const user = await User.findByEmail(email);
-  if (!user) {
-    throw new AppError('Invalid email or password', 401);
-  }
-
-  // Check if user is active
-  if (!user.is_active) {
-    throw new AppError('Account is deactivated', 401);
-  }
-
-  // Verify password
-  const isPasswordValid = await user.verifyPassword(password);
-  if (!isPasswordValid) {
-    throw new AppError('Invalid email or password', 401);
-  }
-
-  // Update last login
-  await user.updateLastLogin();
-
-  // Generate tokens
-  const token = user.generateToken();
-  const refreshToken = user.generateRefreshToken();
-
-  // Set cookie for refresh token
-  res.cookie('refreshToken', refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-  });
-
-  res.json({
-    success: true,
-    message: 'Login successful',
-    data: {
-      user: user.toSafeObject(),
-      token
+      user: user.toSafeObject()
     }
   });
 });
@@ -110,13 +251,19 @@ const logout = asyncHandler(async (req, res) => {
     expires: new Date(0)
   });
 
+  // Log logout
+  logger.info('User logged out', {
+    userId: req.user?.id,
+    ip: req.ip
+  });
+
   res.json({
     success: true,
     message: 'Logout successful'
   });
 });
 
-// Refresh token
+// Refresh token (existing code)
 const refreshToken = asyncHandler(async (req, res) => {
   const refreshToken = req.cookies.refreshToken;
 
@@ -125,6 +272,7 @@ const refreshToken = asyncHandler(async (req, res) => {
   }
 
   try {
+    const jwt = require('jsonwebtoken');
     const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
     
     if (decoded.type !== 'refresh') {
@@ -175,7 +323,7 @@ const getProfile = asyncHandler(async (req, res) => {
   });
 });
 
-// Update profile
+// Update profile (existing code)
 const updateProfile = asyncHandler(async (req, res) => {
   const { username, email, first_name, last_name, bio } = req.body;
   
@@ -217,7 +365,7 @@ const updateProfile = asyncHandler(async (req, res) => {
   });
 });
 
-// Change password
+// Change password (existing code)
 const changePassword = asyncHandler(async (req, res) => {
   const { currentPassword, newPassword } = req.body;
 
@@ -241,7 +389,7 @@ const changePassword = asyncHandler(async (req, res) => {
   });
 });
 
-// Upload profile image
+// Upload profile image (existing code)
 const uploadProfileImage = asyncHandler(async (req, res) => {
   if (!req.file) {
     throw new AppError('No image file provided', 400);
@@ -266,7 +414,7 @@ const uploadProfileImage = asyncHandler(async (req, res) => {
   });
 });
 
-// Forgot password
+// Forgot password (existing code)
 const forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
 
@@ -296,7 +444,7 @@ const forgotPassword = asyncHandler(async (req, res) => {
   }
 });
 
-// Reset password
+// Reset password (existing code)
 const resetPassword = asyncHandler(async (req, res) => {
   const { token, newPassword } = req.body;
 
@@ -318,7 +466,7 @@ const resetPassword = asyncHandler(async (req, res) => {
   });
 });
 
-// Verify email
+// Verify email (existing code)
 const verifyEmail = asyncHandler(async (req, res) => {
   const { token } = req.params;
 
@@ -335,7 +483,7 @@ const verifyEmail = asyncHandler(async (req, res) => {
   });
 });
 
-// Resend verification email
+// Resend verification email (existing code)
 const resendVerification = asyncHandler(async (req, res) => {
   const { email } = req.body;
 
@@ -379,56 +527,13 @@ const checkAuth = asyncHandler(async (req, res) => {
 
 // Get user permissions
 const getPermissions = asyncHandler(async (req, res) => {
-  const permissions = {
-    admin: {
-      articles: ['create', 'read', 'update', 'delete', 'approve', 'schedule'],
-      users: ['create', 'read', 'update', 'delete', 'manage_roles'],
-      categories: ['create', 'read', 'update', 'delete'],
-      tags: ['create', 'read', 'update', 'delete'],
-      comments: ['read', 'approve', 'delete'],
-      media: ['upload', 'read', 'delete'],
-      ads: ['create', 'read', 'update', 'delete'],
-      analytics: ['read', 'export']
-    },
-    editor: {
-      articles: ['create', 'read', 'update', 'delete', 'approve', 'schedule'],
-      users: ['read'],
-      categories: ['create', 'read', 'update'],
-      tags: ['create', 'read', 'update'],
-      comments: ['read', 'approve', 'delete'],
-      media: ['upload', 'read', 'delete'],
-      ads: ['read'],
-      analytics: ['read']
-    },
-    journalist: {
-      articles: ['create', 'read', 'update_own'],
-      users: ['read_profile'],
-      categories: ['read'],
-      tags: ['read'],
-      comments: ['read'],
-      media: ['upload', 'read_own'],
-      ads: ['read'],
-      analytics: ['read_own']
-    },
-    user: {
-      articles: ['read'],
-      users: ['read_profile'],
-      categories: ['read'],
-      tags: ['read'],
-      comments: ['create', 'read'],
-      media: ['read'],
-      ads: ['read'],
-      analytics: []
-    }
-  };
-
-  const userPermissions = permissions[req.user.role] || permissions.user;
+  const permissions = authService.getUserPermissions(req.user.role);
 
   res.json({
     success: true,
     data: {
       role: req.user.role,
-      permissions: userPermissions
+      permissions
     }
   });
 });
@@ -436,6 +541,8 @@ const getPermissions = asyncHandler(async (req, res) => {
 module.exports = {
   register,
   login,
+  verifyOTPAndLogin,
+  resendOTP,
   logout,
   refreshToken,
   getProfile,

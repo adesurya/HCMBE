@@ -1,7 +1,7 @@
 // src/controllers/tagController.js
 const Tag = require('../models/Tag');
 const { AppError, asyncHandler } = require('../middleware/errorHandler');
-const logger = require('../utils/logger');
+const logger = require('../../scripts/baksrc/utils/logger');
 
 // Get all tags
 const getTags = asyncHandler(async (req, res) => {

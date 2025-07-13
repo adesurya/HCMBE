@@ -1,5 +1,5 @@
 // src/middleware/errorHandler.js
-const logger = require('../utils/logger');
+const logger = require('../../scripts/baksrc/utils/logger');
 
 // Custom error class
 class AppError extends Error {

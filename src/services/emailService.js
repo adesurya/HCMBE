@@ -2,7 +2,7 @@
 const nodemailer = require('nodemailer');
 const fs = require('fs').promises;
 const path = require('path');
-const logger = require('../utils/logger');
+const logger = require('../../scripts/baksrc/utils/logger');
 
 class EmailService {
   constructor() {
@@ -581,6 +581,297 @@ class EmailService {
     } catch (error) {
       logger.error('Failed to send comment notification:', error.message);
     }
+  }
+
+  // Send OTP email for login verification
+  async sendOTPEmail(email, otp, userName) {
+    const html = await this.loadTemplate('otp-verification', {
+      user_name: userName,
+      otp_code: otp,
+      expiry_minutes: 10,
+      subject: 'Login Verification Code',
+      content: `
+        <div style="text-align: center; margin: 30px 0;">
+          <h2 style="color: #2c3e50; margin-bottom: 20px;">Login Verification Required</h2>
+          <p style="font-size: 16px; color: #555; margin-bottom: 30px;">
+            Hello ${userName},<br><br>
+            We received a login request for your account. Please use the verification code below to complete your login:
+          </p>
+          
+          <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                      padding: 25px; border-radius: 12px; margin: 30px 0; 
+                      box-shadow: 0 8px 25px rgba(102, 126, 234, 0.25);">
+            <div style="font-size: 36px; font-weight: bold; color: white; 
+                        letter-spacing: 8px; font-family: 'Courier New', monospace;">
+              ${otp}
+            </div>
+            <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0; font-size: 14px;">
+              Verification Code
+            </p>
+          </div>
+          
+          <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; 
+                      border-left: 4px solid #ffc107; margin: 20px 0;">
+            <p style="margin: 0; color: #856404; font-size: 14px;">
+              <strong>⚠️ Security Notice:</strong><br>
+              This code will expire in <strong>10 minutes</strong>.<br>
+              If you didn't request this login, please ignore this email and secure your account.
+            </p>
+          </div>
+          
+          <p style="font-size: 14px; color: #666; line-height: 1.6;">
+            For your security, never share this code with anyone. Our team will never ask for your verification code.
+          </p>
+          
+          <div style="border-top: 1px solid #eee; padding-top: 20px; margin-top: 30px;">
+            <p style="font-size: 12px; color: #999;">
+              Login attempted from: <strong>${new Date().toLocaleString()}</strong><br>
+              If this wasn't you, please change your password immediately.
+            </p>
+          </div>
+        </div>
+      `
+    });
+
+    return await this.sendEmail(
+      email,
+      'Login Verification Code - Action Required',
+      html
+    );
+  }
+
+  // Send login success notification
+  async sendLoginSuccessNotification(email, userName, loginDetails = {}) {
+    const { ip, location, device, timestamp } = loginDetails;
+    
+    const html = await this.loadTemplate('login-success', {
+      user_name: userName,
+      login_time: timestamp || new Date().toLocaleString(),
+      ip_address: ip || 'Unknown',
+      location: location || 'Unknown',
+      device: device || 'Unknown',
+      subject: 'Successful Login to Your Account',
+      content: `
+        <div style="text-align: center;">
+          <div style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); 
+                      color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px;">
+            <h2 style="margin: 0 0 10px 0;">✅ Login Successful</h2>
+            <p style="margin: 0; opacity: 0.9;">Your account was accessed successfully</p>
+          </div>
+          
+          <p style="font-size: 16px; color: #555; margin-bottom: 30px;">
+            Hello ${userName},<br><br>
+            We're confirming that your account was successfully accessed with the following details:
+          </p>
+          
+          <div style="background: #f8f9fa; padding: 25px; border-radius: 8px; 
+                      text-align: left; margin: 20px 0; border: 1px solid #e9ecef;">
+            <h3 style="color: #495057; margin-top: 0;">Login Details:</h3>
+            <table style="width: 100%; border-collapse: collapse;">
+              <tr style="border-bottom: 1px solid #dee2e6;">
+                <td style="padding: 8px 0; font-weight: bold; color: #6c757d;">Time:</td>
+                <td style="padding: 8px 0;">${timestamp || new Date().toLocaleString()}</td>
+              </tr>
+              <tr style="border-bottom: 1px solid #dee2e6;">
+                <td style="padding: 8px 0; font-weight: bold; color: #6c757d;">IP Address:</td>
+                <td style="padding: 8px 0;">${ip || 'Unknown'}</td>
+              </tr>
+              <tr style="border-bottom: 1px solid #dee2e6;">
+                <td style="padding: 8px 0; font-weight: bold; color: #6c757d;">Location:</td>
+                <td style="padding: 8px 0;">${location || 'Unknown'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #6c757d;">Device:</td>
+                <td style="padding: 8px 0;">${device || 'Unknown'}</td>
+              </tr>
+            </table>
+          </div>
+          
+          <div style="background: #fff3cd; padding: 15px; border-radius: 8px; 
+                      border-left: 4px solid #ffc107; margin: 20px 0;">
+            <p style="margin: 0; color: #856404; font-size: 14px;">
+              <strong>🔒 Security Tip:</strong> If this login wasn't made by you, please contact our support team immediately and change your password.
+            </p>
+          </div>
+          
+          <a href="${this.siteUrl}/profile/security" 
+            style="display: inline-block; background: #007bff; color: white; 
+                    padding: 12px 24px; text-decoration: none; border-radius: 6px; 
+                    margin: 20px 0; font-weight: bold;">
+            Review Security Settings
+          </a>
+        </div>
+      `
+    });
+
+    return await this.sendEmail(
+      email,
+      'Login Notification - Account Accessed',
+      html
+    );
+  }
+
+  // Send suspicious login attempt notification
+  async sendSuspiciousLoginAlert(email, userName, attemptDetails = {}) {
+    const { ip, location, timestamp, reason } = attemptDetails;
+    
+    const html = await this.loadTemplate('suspicious-login', {
+      user_name: userName,
+      attempt_time: timestamp || new Date().toLocaleString(),
+      ip_address: ip || 'Unknown',
+      location: location || 'Unknown',
+      reason: reason || 'Unusual login pattern detected',
+      subject: 'Security Alert - Suspicious Login Attempt',
+      content: `
+        <div style="text-align: center;">
+          <div style="background: linear-gradient(135deg, #dc3545 0%, #c82333 100%); 
+                      color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px;">
+            <h2 style="margin: 0 0 10px 0;">🚨 Security Alert</h2>
+            <p style="margin: 0; opacity: 0.9;">Suspicious login attempt detected</p>
+          </div>
+          
+          <p style="font-size: 16px; color: #555; margin-bottom: 30px;">
+            Hello ${userName},<br><br>
+            We detected a suspicious login attempt on your account. For your security, we've temporarily blocked this attempt.
+          </p>
+          
+          <div style="background: #f8f9fa; padding: 25px; border-radius: 8px; 
+                      text-align: left; margin: 20px 0; border: 1px solid #e9ecef;">
+            <h3 style="color: #495057; margin-top: 0;">Attempt Details:</h3>
+            <table style="width: 100%; border-collapse: collapse;">
+              <tr style="border-bottom: 1px solid #dee2e6;">
+                <td style="padding: 8px 0; font-weight: bold; color: #6c757d;">Time:</td>
+                <td style="padding: 8px 0;">${timestamp || new Date().toLocaleString()}</td>
+              </tr>
+              <tr style="border-bottom: 1px solid #dee2e6;">
+                <td style="padding: 8px 0; font-weight: bold; color: #6c757d;">IP Address:</td>
+                <td style="padding: 8px 0;">${ip || 'Unknown'}</td>
+              </tr>
+              <tr style="border-bottom: 1px solid #dee2e6;">
+                <td style="padding: 8px 0; font-weight: bold; color: #6c757d;">Location:</td>
+                <td style="padding: 8px 0;">${location || 'Unknown'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #6c757d;">Reason:</td>
+                <td style="padding: 8px 0;">${reason || 'Unusual login pattern detected'}</td>
+              </tr>
+            </table>
+          </div>
+          
+          <div style="background: #f8d7da; padding: 20px; border-radius: 8px; 
+                      border-left: 4px solid #dc3545; margin: 20px 0;">
+            <p style="margin: 0; color: #721c24; font-size: 14px; line-height: 1.6;">
+              <strong>🔐 Immediate Action Required:</strong><br>
+              1. Change your password immediately<br>
+              2. Review your recent account activity<br>
+              3. Enable two-factor authentication if not already enabled<br>
+              4. Contact support if you didn't attempt to login
+            </p>
+          </div>
+          
+          <div style="margin: 30px 0;">
+            <a href="${this.siteUrl}/reset-password" 
+              style="display: inline-block; background: #dc3545; color: white; 
+                      padding: 12px 24px; text-decoration: none; border-radius: 6px; 
+                      margin: 0 10px 10px 0; font-weight: bold;">
+              Change Password
+            </a>
+            <a href="${this.siteUrl}/profile/security" 
+              style="display: inline-block; background: #6c757d; color: white; 
+                      padding: 12px 24px; text-decoration: none; border-radius: 6px; 
+                      margin: 0 10px 10px 0; font-weight: bold;">
+              Review Security
+            </a>
+          </div>
+          
+          <p style="font-size: 12px; color: #6c757d; margin-top: 30px;">
+            If this was you, you can safely ignore this email. However, we recommend reviewing your security settings.
+          </p>
+        </div>
+      `
+    });
+
+    return await this.sendEmail(
+      email,
+      '🚨 Security Alert - Suspicious Login Attempt Blocked',
+      html
+    );
+  }
+
+  // Send account lockout notification
+  async sendAccountLockoutNotification(email, userName, lockoutDetails = {}) {
+    const { reason, duration, unlockTime, ip } = lockoutDetails;
+    
+    const html = await this.loadTemplate('account-lockout', {
+      user_name: userName,
+      lockout_reason: reason || 'Too many failed login attempts',
+      duration_minutes: duration || 15,
+      unlock_time: unlockTime || 'in 15 minutes',
+      ip_address: ip || 'Unknown',
+      subject: 'Account Temporarily Locked - Security Measure',
+      content: `
+        <div style="text-align: center;">
+          <div style="background: linear-gradient(135deg, #ffc107 0%, #e0a800 100%); 
+                      color: #212529; padding: 30px; border-radius: 12px; margin-bottom: 30px;">
+            <h2 style="margin: 0 0 10px 0;">🔒 Account Temporarily Locked</h2>
+            <p style="margin: 0; opacity: 0.8;">Security measure activated</p>
+          </div>
+          
+          <p style="font-size: 16px; color: #555; margin-bottom: 30px;">
+            Hello ${userName},<br><br>
+            Your account has been temporarily locked as a security precaution due to: <strong>${reason || 'multiple failed login attempts'}</strong>
+          </p>
+          
+          <div style="background: #fff3cd; padding: 25px; border-radius: 8px; 
+                      border-left: 4px solid #ffc107; margin: 20px 0;">
+            <h3 style="color: #856404; margin-top: 0;">Lockout Information:</h3>
+            <p style="color: #856404; margin: 10px 0;">
+              <strong>Duration:</strong> ${duration || 15} minutes<br>
+              <strong>Unlock Time:</strong> ${unlockTime || 'in 15 minutes'}<br>
+              <strong>IP Address:</strong> ${ip || 'Unknown'}
+            </p>
+          </div>
+          
+          <div style="background: #d1ecf1; padding: 20px; border-radius: 8px; 
+                      border-left: 4px solid #17a2b8; margin: 20px 0;">
+            <p style="margin: 0; color: #0c5460; font-size: 14px; line-height: 1.6;">
+              <strong>What happens next:</strong><br>
+              • Your account will automatically unlock after the specified duration<br>
+              • You can then attempt to login again<br>
+              • If you continue to have issues, please contact support
+            </p>
+          </div>
+          
+          <div style="background: #f8d7da; padding: 20px; border-radius: 8px; 
+                      border-left: 4px solid #dc3545; margin: 20px 0;">
+            <p style="margin: 0; color: #721c24; font-size: 14px; line-height: 1.6;">
+              <strong>Security Recommendations:</strong><br>
+              • If this wasn't you, change your password immediately after unlock<br>
+              • Use a strong, unique password<br>
+              • Consider enabling two-factor authentication<br>
+              • Check for any unauthorized account activity
+            </p>
+          </div>
+          
+          <a href="${this.siteUrl}/contact" 
+            style="display: inline-block; background: #17a2b8; color: white; 
+                    padding: 12px 24px; text-decoration: none; border-radius: 6px; 
+                    margin: 20px 0; font-weight: bold;">
+            Contact Support
+          </a>
+          
+          <p style="font-size: 12px; color: #6c757d; margin-top: 30px;">
+            This is an automated security measure to protect your account from unauthorized access.
+          </p>
+        </div>
+      `
+    });
+
+    return await this.sendEmail(
+      email,
+      '🔒 Account Temporarily Locked - Security Notification',
+      html
+    );
   }
 }
 

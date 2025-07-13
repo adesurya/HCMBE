@@ -1,7 +1,7 @@
 // src/services/sitemapService.js - V2 with Database Helper
-const dbHelper = require('../utils/databaseHelper');
+const dbHelper = require('../../scripts/baksrc/utils/databaseHelper');
 const redis = require('../config/redis');
-const logger = require('../utils/logger');
+const logger = require('../../scripts/baksrc/utils/logger');
 const fs = require('fs').promises;
 const path = require('path');
 

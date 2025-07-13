@@ -1,7 +1,7 @@
 // src/controllers/sitemapController.js
 const sitemapService = require('../services/sitemapService');
 const { AppError, asyncHandler } = require('../middleware/errorHandler');
-const logger = require('../utils/logger');
+const logger = require('../../scripts/baksrc/utils/logger');
 const path = require('path');
 const fs = require('fs').promises;
 

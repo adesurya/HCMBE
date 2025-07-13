@@ -4,7 +4,7 @@ const User = require('../models/User');
 const { AppError, asyncHandler } = require('../middleware/errorHandler');
 const analyticsService = require('../services/analyticsService');
 const emailService = require('../services/emailService');
-const logger = require('../utils/logger');
+const logger = require('../../scripts/baksrc/utils/logger');
 
 // Get all articles (public)
 const getArticles = asyncHandler(async (req, res) => {

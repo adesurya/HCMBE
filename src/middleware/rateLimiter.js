@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const slowDown = require('express-slow-down');
 const RedisStore = require('rate-limit-redis');
 const redis = require('../config/redis');
-const logger = require('../utils/logger');
+const logger = require('../../scripts/baksrc/utils/logger');
 const { rateLimiters } = require('./security');
 
 // Custom key generator based on IP and user ID
