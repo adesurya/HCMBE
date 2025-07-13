@@ -1,9 +1,9 @@
-// src/routes/sitemap.js
+// src/routes/sitemap.js - Fixed version
 const express = require('express');
 const router = express.Router();
 const sitemapController = require('../controllers/sitemapController');
 const { verifyToken, requireRole } = require('../middleware/auth');
-const { rateLimiters } = require('../middleware/rateLimiter');
+const { rateLimiters } = require('../middleware/security'); // Fixed: Changed from rateLimiter to security
 
 // Public sitemap routes (no authentication required)
 router.get('/sitemap.xml', rateLimiters.general, sitemapController.getSitemapIndex);

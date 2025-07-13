@@ -4,6 +4,7 @@ const slowDown = require('express-slow-down');
 const RedisStore = require('rate-limit-redis');
 const redis = require('../config/redis');
 const logger = require('../utils/logger');
+const { rateLimiters } = require('./security');
 
 // Custom key generator based on IP and user ID
 const keyGenerator = (req) => {
@@ -381,24 +382,20 @@ const createMethodBasedLimiter = (methodLimits) => {
 // Export rate limiters and utilities
 module.exports = {
   rateLimiters,
-  speedLimiters,
-  createAdvancedRateLimiter,
-  createRoleBasedRateLimiter,
-  createProgressiveLimiter,
-  createWhitelistMiddleware,
-  createDynamicRateLimiter,
-  createMethodBasedLimiter,
-  suspiciousActivityLimiter,
   
-  // Specific limiters for common use cases
+  // Individual rate limiters for convenience
+  general: rateLimiters.general,
+  auth: rateLimiters.auth,
+  login: rateLimiters.login,
+  upload: rateLimiters.upload,
+  comment: rateLimiters.comment,
+  search: rateLimiters.search,
+  
+  // Legacy exports
   strictAuth: rateLimiters.auth,
   strictLogin: rateLimiters.login,
   generalApi: rateLimiters.general,
   fileUpload: rateLimiters.upload,
   searchRequests: rateLimiters.search,
-  commentPosting: rateLimiters.comment,
-  
-  // Utility functions
-  keyGenerator,
-  createStore
+  commentPosting: rateLimiters.comment
 };

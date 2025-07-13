@@ -1,4 +1,4 @@
-/ src/config/cloudinary.js
+// src/config/cloudinary.js - Fixed version
 const cloudinary = require('cloudinary').v2;
 const logger = require('../utils/logger');
 

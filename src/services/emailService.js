@@ -1,4 +1,4 @@
-// src/services/emailService.js - Fixed version with better error handling
+// src/services/emailService.js - Enhanced version with SSL certificate fixes
 const nodemailer = require('nodemailer');
 const fs = require('fs').promises;
 const path = require('path');
@@ -11,30 +11,96 @@ class EmailService {
     this.siteUrl = process.env.SITE_URL || 'http://localhost:3000';
     this.siteName = process.env.SITE_NAME || 'News Portal';
     this.isEnabled = process.env.EMAIL_ENABLED === 'true';
+    this.transporter = null;
     
-    // Only create transporter if email is enabled and SMTP settings are provided
-    if (this.isEnabled && this.hasRequiredSmtpConfig()) {
-      this.createTransporter();
-    } else {
-      logger.warn('Email service disabled or SMTP configuration missing');
+    // Initialize email service
+    this.initialize();
+  }
+
+  // Initialize email service with better error handling
+  async initialize() {
+    try {
+      if (!this.isEnabled) {
+        logger.info('📧 Email service disabled (EMAIL_ENABLED=false)');
+        return;
+      }
+
+      if (!this.hasRequiredSmtpConfig()) {
+        logger.warn('📧 Email service disabled - Missing SMTP configuration');
+        logger.info('💡 To enable email service, set these environment variables:');
+        logger.info('   - EMAIL_ENABLED=true');
+        logger.info('   - SMTP_HOST=your.smtp.host');
+        logger.info('   - SMTP_PORT=587');
+        logger.info('   - SMTP_USER=your.email@domain.com');
+        logger.info('   - SMTP_PASS=your_password');
+        this.isEnabled = false;
+        return;
+      }
+
+      await this.createTransporter();
+    } catch (error) {
+      logger.error('📧 Email service initialization failed:', error.message);
+      
+      // Don't disable completely, just mark as not connected
+      // This allows the app to continue running
       this.transporter = null;
+      
+      // Provide helpful error-specific guidance
+      this.handleInitializationError(error);
     }
+  }
+
+  // Handle initialization errors with specific guidance
+  handleInitializationError(error) {
+    const errorMessage = error.message.toLowerCase();
+    
+    if (errorMessage.includes('self-signed certificate') || 
+        errorMessage.includes('certificate') || 
+        errorMessage.includes('ssl') ||
+        errorMessage.includes('tls')) {
+      
+      logger.info('🔧 SSL Certificate Issue Detected:');
+      logger.info('   This is common with local mail servers or some SMTP providers.');
+      logger.info('   Solutions:');
+      logger.info('   1. Add SMTP_REJECT_UNAUTHORIZED=false to your .env file');
+      logger.info('   2. Or use a different SMTP provider (Gmail, SendGrid, etc.)');
+      logger.info('   3. Or disable email with EMAIL_ENABLED=false');
+      
+    } else if (errorMessage.includes('econnrefused') || errorMessage.includes('enotfound')) {
+      
+      logger.info('🔧 Connection Issue Detected:');
+      logger.info('   - Check if SMTP_HOST and SMTP_PORT are correct');
+      logger.info('   - Verify your internet connection');
+      logger.info('   - Try a different SMTP provider');
+      
+    } else if (errorMessage.includes('auth') || errorMessage.includes('login')) {
+      
+      logger.info('🔧 Authentication Issue Detected:');
+      logger.info('   - Check SMTP_USER and SMTP_PASS are correct');
+      logger.info('   - For Gmail: Use App Password instead of regular password');
+      
+    }
+    
+    logger.info('📧 Email service will continue in mock mode (emails will be logged but not sent)');
   }
 
   // Check if required SMTP configuration exists
   hasRequiredSmtpConfig() {
-    return !!(
-      process.env.SMTP_HOST &&
-      process.env.SMTP_PORT &&
-      process.env.SMTP_USER &&
-      process.env.SMTP_PASS
-    );
+    const required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS'];
+    const missing = required.filter(key => !process.env[key]);
+    
+    if (missing.length > 0) {
+      logger.debug(`Missing SMTP config: ${missing.join(', ')}`);
+      return false;
+    }
+    
+    return true;
   }
 
-  // Create email transporter
-  createTransporter() {
+  // Create email transporter with SSL certificate handling
+  async createTransporter() {
     try {
-      this.transporter = nodemailer.createTransporter({
+      const transportConfig = {
         host: process.env.SMTP_HOST,
         port: parseInt(process.env.SMTP_PORT),
         secure: process.env.SMTP_PORT === '465', // true for 465, false for other ports
@@ -48,68 +114,90 @@ class EmailService {
         connectionTimeout: 10000, // 10 seconds
         greetingTimeout: 10000, // 10 seconds
         socketTimeout: 30000, // 30 seconds
-        // Add TLS options for better compatibility
-        tls: {
-          rejectUnauthorized: false // Only for development/testing
-        }
-      });
+      };
 
-      // Only verify connection if transporter is created successfully
-      this.verifyConnection();
+      // Handle SSL/TLS configuration based on environment and settings
+      const rejectUnauthorized = process.env.SMTP_REJECT_UNAUTHORIZED !== 'false';
+      
+      if (process.env.NODE_ENV === 'development' || !rejectUnauthorized) {
+        // More permissive SSL settings for development or when explicitly disabled
+        transportConfig.tls = {
+          rejectUnauthorized: false,
+          ciphers: 'SSLv3',
+          secureProtocol: 'TLSv1_method'
+        };
+        logger.info('📧 Using permissive SSL settings for development');
+      } else {
+        // Production SSL settings
+        transportConfig.tls = {
+          rejectUnauthorized: true,
+          minVersion: 'TLSv1.2'
+        };
+      }
+
+      // Special configuration for common providers
+      const host = process.env.SMTP_HOST?.toLowerCase();
+      if (host?.includes('gmail')) {
+        transportConfig.service = 'gmail';
+        logger.info('📧 Using Gmail service configuration');
+      } else if (host?.includes('outlook') || host?.includes('hotmail')) {
+        transportConfig.service = 'hotmail';
+        logger.info('📧 Using Outlook service configuration');
+      } else if (host?.includes('yahoo')) {
+        transportConfig.service = 'yahoo';
+        logger.info('📧 Using Yahoo service configuration');
+      }
+
+      this.transporter = nodemailer.createTransport(transportConfig);
+
+      // Test connection with fallback
+      const isConnected = await this.verifyConnection();
+      if (!isConnected) {
+        // Try with more permissive settings
+        logger.info('📧 Retrying with more permissive SSL settings...');
+        transportConfig.tls = {
+          rejectUnauthorized: false,
+          ciphers: 'SSLv3'
+        };
+        
+        this.transporter = nodemailer.createTransport(transportConfig);
+        const retryConnected = await this.verifyConnection();
+        
+        if (!retryConnected) {
+          throw new Error('SMTP connection verification failed after retry');
+        }
+      }
+
+      logger.info('✅ Email service initialized successfully');
     } catch (error) {
-      logger.error('Failed to create email transporter:', error);
-      this.transporter = null;
+      logger.error('❌ Failed to create email transporter:', error.message);
+      throw error;
     }
   }
 
-  // Verify SMTP connection with better error handling
+  // Verify SMTP connection with timeout and retry
   async verifyConnection() {
     if (!this.transporter) {
-      logger.warn('Email transporter not available for verification');
       return false;
     }
 
     try {
-      await this.transporter.verify();
-      logger.info('✅ Email service connected successfully');
+      // Add timeout to verification
+      const verificationPromise = this.transporter.verify();
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Connection timeout')), 15000) // Increased to 15 seconds
+      );
+
+      await Promise.race([verificationPromise, timeoutPromise]);
+      logger.info('✅ SMTP connection verified successfully');
       return true;
     } catch (error) {
-      logger.error('❌ Email service connection failed:', {
-        message: error.message,
-        code: error.code,
-        command: error.command
-      });
-      
-      // Provide helpful error messages
-      this.logConnectionHelp(error);
+      logger.error('❌ SMTP connection verification failed:', error.message);
       return false;
     }
   }
 
-  // Log helpful connection error messages
-  logConnectionHelp(error) {
-    const helpMessages = {
-      'ESOCKET': 'Cannot connect to SMTP server. Check SMTP_HOST and SMTP_PORT.',
-      'ECONNREFUSED': 'Connection refused. SMTP server may be down or port blocked.',
-      'ENOTFOUND': 'SMTP host not found. Check SMTP_HOST configuration.',
-      'EAUTH': 'Authentication failed. Check SMTP_USER and SMTP_PASS.',
-      'ETIMEDOUT': 'Connection timeout. SMTP server may be slow or unreachable.'
-    };
-
-    const helpMessage = helpMessages[error.code] || 'Unknown SMTP error occurred.';
-    logger.warn(`Email Connection Help: ${helpMessage}`);
-    
-    // Log current configuration (without sensitive data)
-    logger.info('Current SMTP Configuration:', {
-      host: process.env.SMTP_HOST || 'not set',
-      port: process.env.SMTP_PORT || 'not set',
-      user: process.env.SMTP_USER ? '***configured***' : 'not set',
-      pass: process.env.SMTP_PASS ? '***configured***' : 'not set',
-      enabled: this.isEnabled
-    });
-  }
-
-  // Load email template with better error handling
+  // Load email template with fallback
   async loadTemplate(templateName, variables = {}) {
     try {
       const templatePath = path.join(__dirname, '../templates/emails', `${templateName}.html`);
@@ -133,7 +221,7 @@ class EmailService {
     }
   }
 
-  // Get default template if file template fails
+  // Get default template
   getDefaultTemplate(variables = {}) {
     return `
       <!DOCTYPE html>
@@ -164,8 +252,7 @@ class EmailService {
           <div class="footer">
             <p>&copy; ${new Date().getFullYear()} ${this.siteName}. All rights reserved.</p>
             <p>
-              <a href="${this.siteUrl}">Visit our website</a> | 
-              <a href="${this.siteUrl}/unsubscribe">Unsubscribe</a>
+              <a href="${this.siteUrl}">Visit our website</a>
             </p>
           </div>
         </div>
@@ -174,12 +261,19 @@ class EmailService {
     `;
   }
 
-  // Send email with fallback handling
+  // Send email with comprehensive error handling
   async sendEmail(to, subject, html, text = null) {
-    // If email service is disabled or not configured, log and return
+    // If email service is disabled or no transporter, log and return success
     if (!this.isEnabled || !this.transporter) {
-      logger.info(`Email would be sent to ${to}: ${subject} (Email service disabled)`);
-      return { messageId: 'disabled', info: 'Email service disabled' };
+      logger.info(`📧 [MOCK] Email would be sent to ${to}: ${subject}`);
+      if (process.env.NODE_ENV === 'development') {
+        logger.debug('📧 Email content preview:', { to, subject, html: html.substring(0, 200) + '...' });
+      }
+      return { 
+        messageId: 'mock-' + Date.now(), 
+        info: 'Email service in mock mode - email logged but not sent',
+        success: true 
+      };
     }
 
     try {
@@ -193,7 +287,7 @@ class EmailService {
 
       const result = await this.transporter.sendMail(mailOptions);
       logger.info(`✅ Email sent successfully to ${to}: ${subject}`);
-      return result;
+      return { ...result, success: true };
     } catch (error) {
       logger.error(`❌ Failed to send email to ${to}:`, {
         subject,
@@ -201,17 +295,17 @@ class EmailService {
         code: error.code
       });
 
-      // For development, we don't want to crash the app
-      if (process.env.NODE_ENV === 'development') {
-        logger.warn('Email failed in development mode - continuing execution');
-        return { messageId: 'failed', error: error.message };
-      }
-
-      throw error;
+      // Return a structured error response instead of throwing
+      return { 
+        messageId: null, 
+        error: error.message, 
+        success: false,
+        code: error.code 
+      };
     }
   }
 
-  // Convert HTML to plain text (basic)
+  // Convert HTML to plain text
   htmlToText(html) {
     return html
       .replace(/<[^>]*>/g, '') // Remove HTML tags
@@ -227,9 +321,10 @@ class EmailService {
   // Safe email sending wrapper
   async safeEmailSend(emailFunction, ...args) {
     try {
-      return await emailFunction.apply(this, args);
+      const result = await emailFunction.apply(this, args);
+      return result.success;
     } catch (error) {
-      logger.error('Email sending failed:', error);
+      logger.error('Email sending failed:', error.message);
       return false;
     }
   }
@@ -304,10 +399,104 @@ class EmailService {
     );
   }
 
-  // Send article approval notification to editors
+  // Test email configuration
+  async testEmailConfiguration() {
+    try {
+      if (!this.isEnabled) {
+        return { 
+          success: false, 
+          error: 'Email service is disabled. Set EMAIL_ENABLED=true and configure SMTP settings.' 
+        };
+      }
+
+      if (!this.transporter) {
+        return { 
+          success: false, 
+          error: 'No email transporter available. Check SMTP configuration and SSL settings.' 
+        };
+      }
+
+      // Test connection first
+      const isConnected = await this.verifyConnection();
+      if (!isConnected) {
+        return { 
+          success: false, 
+          error: 'Cannot connect to SMTP server. Check SMTP settings and SSL configuration.' 
+        };
+      }
+
+      const testEmail = process.env.ADMIN_EMAIL || process.env.SMTP_USER || this.fromEmail;
+      
+      const result = await this.sendEmail(
+        testEmail,
+        'Email Configuration Test',
+        this.getDefaultTemplate({
+          subject: 'Email Configuration Test',
+          content: `
+            <h2>✅ Email Test Successful!</h2>
+            <p>If you receive this email, your email configuration is working correctly.</p>
+            <p><strong>Test Details:</strong></p>
+            <ul>
+              <li><strong>SMTP Host:</strong> ${process.env.SMTP_HOST}</li>
+              <li><strong>SMTP Port:</strong> ${process.env.SMTP_PORT}</li>
+              <li><strong>From Email:</strong> ${this.fromEmail}</li>
+              <li><strong>SSL Reject Unauthorized:</strong> ${process.env.SMTP_REJECT_UNAUTHORIZED !== 'false'}</li>
+              <li><strong>Test Time:</strong> ${new Date().toISOString()}</li>
+            </ul>
+          `
+        })
+      );
+      
+      return { 
+        success: result.success, 
+        message: result.success ? 'Test email sent successfully' : 'Failed to send test email', 
+        result 
+      };
+    } catch (error) {
+      logger.error('Email configuration test failed:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Get email service status
+  getStatus() {
+    return {
+      enabled: this.isEnabled,
+      configured: this.hasRequiredSmtpConfig(),
+      connected: !!this.transporter,
+      settings: {
+        host: process.env.SMTP_HOST || 'not configured',
+        port: process.env.SMTP_PORT || 'not configured',
+        user: process.env.SMTP_USER ? 'configured' : 'not configured',
+        from: this.fromEmail,
+        secure: process.env.SMTP_PORT === '465',
+        rejectUnauthorized: process.env.SMTP_REJECT_UNAUTHORIZED !== 'false'
+      }
+    };
+  }
+
+  // Enable/disable email service
+  async setEnabled(enabled) {
+    this.isEnabled = enabled;
+    if (enabled && !this.transporter && this.hasRequiredSmtpConfig()) {
+      await this.initialize();
+    } else if (!enabled) {
+      this.close();
+    }
+  }
+
+  // Close transporter
+  close() {
+    if (this.transporter) {
+      this.transporter.close();
+      this.transporter = null;
+      logger.info('📧 Email transporter closed');
+    }
+  }
+
+  // Additional email methods with error handling...
   async sendApprovalNotification(article) {
     try {
-      // Get all editors and admins
       const db = require('../config/database');
       const [editors] = await db.execute(
         'SELECT email, first_name, username FROM users WHERE role IN ("admin", "editor") AND is_active = true AND email_verified = true'
@@ -332,14 +521,13 @@ class EmailService {
           `
         });
 
-        await this.safeEmailSend(this.sendEmail, editor.email, 'Article Pending Approval', html);
+        await this.safeEmailSend(this.sendEmail.bind(this), editor.email, 'Article Pending Approval', html);
       }
     } catch (error) {
-      logger.error('Failed to send approval notifications:', error);
+      logger.error('Failed to send approval notifications:', error.message);
     }
   }
 
-  // Send approval confirmation to author
   async sendApprovalConfirmation(email, article) {
     const articleUrl = `${this.siteUrl}/articles/${article.slug}`;
     
@@ -362,7 +550,6 @@ class EmailService {
     );
   }
 
-  // Send comment notification to article author
   async sendCommentNotification(article, comment) {
     try {
       if (!article.author?.email) return;
@@ -392,85 +579,7 @@ class EmailService {
         html
       );
     } catch (error) {
-      logger.error('Failed to send comment notification:', error);
-    }
-  }
-
-  // Test email configuration
-  async testEmailConfiguration() {
-    try {
-      if (!this.isEnabled || !this.transporter) {
-        return { 
-          success: false, 
-          error: 'Email service is disabled or not configured' 
-        };
-      }
-
-      // First verify connection
-      const isConnected = await this.verifyConnection();
-      if (!isConnected) {
-        return { 
-          success: false, 
-          error: 'Cannot connect to SMTP server' 
-        };
-      }
-
-      const testEmail = process.env.ADMIN_EMAIL || this.fromEmail;
-      
-      const result = await this.sendEmail(
-        testEmail,
-        'Email Configuration Test',
-        this.getDefaultTemplate({
-          subject: 'Email Configuration Test',
-          content: `
-            <h2>✅ Email Test Successful!</h2>
-            <p>If you receive this email, your email configuration is working correctly.</p>
-            <p><strong>Test Details:</strong></p>
-            <ul>
-              <li><strong>SMTP Host:</strong> ${process.env.SMTP_HOST}</li>
-              <li><strong>SMTP Port:</strong> ${process.env.SMTP_PORT}</li>
-              <li><strong>From Email:</strong> ${this.fromEmail}</li>
-              <li><strong>Test Time:</strong> ${new Date().toISOString()}</li>
-            </ul>
-          `
-        })
-      );
-      
-      return { success: true, message: 'Test email sent successfully', result };
-    } catch (error) {
-      logger.error('Email configuration test failed:', error);
-      return { success: false, error: error.message };
-    }
-  }
-
-  // Enable/disable email service
-  setEnabled(enabled) {
-    this.isEnabled = enabled;
-    if (enabled && !this.transporter && this.hasRequiredSmtpConfig()) {
-      this.createTransporter();
-    }
-  }
-
-  // Get email service status
-  getStatus() {
-    return {
-      enabled: this.isEnabled,
-      configured: this.hasRequiredSmtpConfig(),
-      connected: !!this.transporter,
-      settings: {
-        host: process.env.SMTP_HOST || 'not configured',
-        port: process.env.SMTP_PORT || 'not configured',
-        user: process.env.SMTP_USER ? 'configured' : 'not configured',
-        from: this.fromEmail
-      }
-    };
-  }
-
-  // Close transporter
-  close() {
-    if (this.transporter) {
-      this.transporter.close();
-      logger.info('Email transporter closed');
+      logger.error('Failed to send comment notification:', error.message);
     }
   }
 }

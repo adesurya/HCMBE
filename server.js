@@ -14,17 +14,6 @@ const path = require('path');
 // Load environment variables
 require('dotenv').config();
 
-// Import sitemap routes
-const sitemapRoutes = require('./src/routes/sitemap');
-const sitemapService = require('./src/services/sitemapService');
-
-// This allows sitemap.xml to be served from the root
-app.use('/', sitemapRoutes);
-
-const sitemapService = require('./src/services/sitemapService');
-const cron = require('node-cron');
-
-
 // Initialize Express app
 const app = express();
 const server = createServer(app);
@@ -52,7 +41,7 @@ try {
 
 // Import route handlers with error handling
 let authRoutes, articleRoutes, categoryRoutes, tagRoutes, commentRoutes, 
-    mediaRoutes, userRoutes, adsRoutes, analyticsRoutes, searchRoutes;
+    mediaRoutes, userRoutes, adsRoutes, analyticsRoutes, searchRoutes, sitemapRoutes;
 
 try {
   authRoutes = require('./src/routes/auth');
@@ -65,6 +54,7 @@ try {
   adsRoutes = require('./src/routes/ads');
   analyticsRoutes = require('./src/routes/analytics');
   searchRoutes = require('./src/routes/search');
+  sitemapRoutes = require('./src/routes/sitemap');
   
   logger.info('✅ All route modules loaded successfully');
 } catch (error) {
@@ -90,6 +80,7 @@ try {
   adsRoutes = adsRoutes || emptyRouter;
   analyticsRoutes = analyticsRoutes || emptyRouter;
   searchRoutes = searchRoutes || emptyRouter;
+  sitemapRoutes = sitemapRoutes || emptyRouter;
 }
 
 // Trust proxy (important for rate limiting and IP detection)
@@ -186,11 +177,14 @@ if (logger && logger.logRequest) {
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
+// SEO routes (these need to be before the API routes to catch root-level requests)
+app.use('/', sitemapRoutes);
+
 // API routes with error handling
 const apiPrefix = `/api/${process.env.API_VERSION || 'v1'}`;
 
 // Root endpoint
-app.get('/', (req, res) => {
+app.get('/api', (req, res) => {
   res.json({
     success: true,
     message: 'News Portal API',
@@ -240,10 +234,12 @@ app.use('*', (req, res) => {
   });
 });
 
+// Sitemap generation on startup
 if (process.env.GENERATE_SITEMAPS_ON_START === 'true') {
   setTimeout(async () => {
     try {
       console.log('Generating initial sitemaps...');
+      const sitemapService = require('./src/services/sitemapService');
       await sitemapService.generateAllSitemaps();
       console.log('✅ Sitemaps generated successfully');
     } catch (error) {
@@ -255,9 +251,12 @@ if (process.env.GENERATE_SITEMAPS_ON_START === 'true') {
 
 // Schedule sitemap generation (runs every hour)
 if (process.env.ENABLE_SITEMAP_CRON === 'true') {
+  const cron = require('node-cron');
+  
   cron.schedule('0 * * * *', async () => {
     try {
       logger.info('Running scheduled sitemap generation...');
+      const sitemapService = require('./src/services/sitemapService');
       await sitemapService.generateAllSitemaps();
       
       // Ping search engines if enabled
@@ -275,7 +274,6 @@ if (process.env.ENABLE_SITEMAP_CRON === 'true') {
 }
 
 // Clear sitemap cache when articles are published/updated
-// Add this middleware to article routes
 const clearSitemapCacheMiddleware = (req, res, next) => {
   // Store original res.json
   const originalJson = res.json;
@@ -286,6 +284,7 @@ const clearSitemapCacheMiddleware = (req, res, next) => {
     if (data && data.success) {
       setTimeout(async () => {
         try {
+          const sitemapService = require('./src/services/sitemapService');
           await sitemapService.clearSitemapCache();
           logger.info('Sitemap cache cleared after article update');
         } catch (error) {
@@ -302,7 +301,6 @@ const clearSitemapCacheMiddleware = (req, res, next) => {
 };
 
 // Apply cache clearing middleware to article routes
-// Add this after your article routes definition
 app.use(`${apiPrefix}/articles`, clearSitemapCacheMiddleware);
 
 // Global error handler
@@ -450,6 +448,9 @@ async function startServer() {
       logger.info(`   - Ads: ${apiPrefix}/ads`);
       logger.info(`   - Analytics: ${apiPrefix}/analytics`);
       logger.info(`   - Search: ${apiPrefix}/search`);
+      logger.info('📋 Available SEO endpoints:');
+      logger.info(`   - Sitemap Index: http://${HOST}:${PORT}/sitemap.xml`);
+      logger.info(`   - Robots.txt: http://${HOST}:${PORT}/robots.txt`);
     });
   } catch (error) {
     logger.error('❌ Failed to start server:', error.message);
