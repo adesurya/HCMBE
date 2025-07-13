@@ -1,7 +1,7 @@
 // src/controllers/searchController.js
 const searchService = require('../services/searchService');
 const { AppError, asyncHandler } = require('../middleware/errorHandler');
-const logger = require('../../scripts/baksrc/utils/logger');
+const logger = require('../utils/logger');
 
 // Search articles
 const searchArticles = asyncHandler(async (req, res) => {

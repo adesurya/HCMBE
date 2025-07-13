@@ -3,7 +3,7 @@ const Analytics = require('../models/Analytics');
 const Article = require('../models/Article');
 const db = require('../config/database');
 const redis = require('../config/redis');
-const logger = require('../../scripts/baksrc/utils/logger');
+const logger = require('../utils/logger');
 
 class AnalyticsService {
   constructor() {

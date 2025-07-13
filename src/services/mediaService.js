@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const db = require('../config/database');
 const { AppError } = require('../middleware/errorHandler');
-const logger = require('../../scripts/baksrc/utils/logger');
+const logger = require('../utils/logger');
 
 // Configure Cloudinary
 cloudinary.config({

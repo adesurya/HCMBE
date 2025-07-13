@@ -1,7 +1,7 @@
 // src/controllers/categoryController.js
 const Category = require('../models/Category');
 const { AppError, asyncHandler } = require('../middleware/errorHandler');
-const logger = require('../../scripts/baksrc/utils/logger');
+const logger = require('../utils/logger');
 
 // Get all categories
 const getCategories = asyncHandler(async (req, res) => {

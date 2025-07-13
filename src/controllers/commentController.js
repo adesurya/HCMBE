@@ -3,7 +3,7 @@ const Comment = require('../models/Comment');
 const Article = require('../models/Article');
 const { AppError, asyncHandler } = require('../middleware/errorHandler');
 const emailService = require('../services/emailService');
-const logger = require('../../scripts/baksrc/utils/logger');
+const logger = require('../utils/logger');
 
 // Get comments for an article
 const getComments = asyncHandler(async (req, res) => {

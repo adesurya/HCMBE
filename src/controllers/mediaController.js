@@ -1,7 +1,7 @@
 // src/controllers/mediaController.js
 const mediaService = require('../services/mediaService');
 const { AppError, asyncHandler } = require('../middleware/errorHandler');
-const logger = require('../../scripts/baksrc/utils/logger');
+const logger = require('../utils/logger');
 
 // Get all media
 const getMedia = asyncHandler(async (req, res) => {

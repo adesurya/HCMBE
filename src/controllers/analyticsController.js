@@ -2,7 +2,7 @@
 const Analytics = require('../models/Analytics');
 const analyticsService = require('../services/analyticsService');
 const { AppError, asyncHandler } = require('../middleware/errorHandler');
-const logger = require('../../scripts/baksrc/utils/logger');
+const logger = require('../utils/logger');
 
 // Get analytics dashboard
 const getDashboard = asyncHandler(async (req, res) => {

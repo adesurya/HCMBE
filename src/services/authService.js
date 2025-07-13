@@ -1,4 +1,4 @@
-// src/services/authService.js - Enhanced with OTP functionality
+// src/services/authService.js - Enhanced with better error handling
 const User = require('../models/User');
 const redis = require('../config/redis');
 const crypto = require('crypto');
@@ -27,160 +27,271 @@ class AuthService {
 
   // Check if account is locked
   async isAccountLocked(identifier) {
-    const key = `lockout:${identifier}`;
-    const lockout = await redis.get(key);
-    return lockout !== null;
+    try {
+      const key = `lockout:${identifier}`;
+      const lockout = await redis.get(key);
+      return lockout !== null;
+    } catch (error) {
+      logger.error('Error checking account lock status:', error);
+      return false; // Fail open for availability
+    }
   }
 
   // Lock account temporarily
   async lockAccount(identifier) {
-    const key = `lockout:${identifier}`;
-    await redis.set(key, '1', this.lockoutDuration);
-    
-    logger.warn(`Account locked for ${identifier}`, {
-      duration: this.lockoutDuration,
-      timestamp: new Date().toISOString()
-    });
+    try {
+      const key = `lockout:${identifier}`;
+      await redis.set(key, '1', this.lockoutDuration);
+      
+      logger.warn(`Account locked for ${identifier}`, {
+        duration: this.lockoutDuration,
+        timestamp: new Date().toISOString()
+      });
+      return true;
+    } catch (error) {
+      logger.error('Error locking account:', error);
+      return false;
+    }
   }
 
   // Track failed login attempt
   async trackFailedLogin(identifier, ip) {
-    const key = `failed_attempts:${identifier}`;
-    const attempts = await redis.incr(key, 3600); // Expire after 1 hour
+    try {
+      const key = `failed_attempts:${identifier}`;
+      const attempts = await redis.incr(key, 3600); // Expire after 1 hour
 
-    logger.warn(`Failed login attempt for ${identifier}`, {
-      attempt: attempts,
-      ip,
-      timestamp: new Date().toISOString()
-    });
+      logger.warn(`Failed login attempt for ${identifier}`, {
+        attempt: attempts,
+        ip,
+        timestamp: new Date().toISOString()
+      });
 
-    if (attempts >= this.maxLoginAttempts) {
-      await this.lockAccount(identifier);
-      return true; // Account is now locked
+      if (attempts >= this.maxLoginAttempts) {
+        await this.lockAccount(identifier);
+        return true; // Account is now locked
+      }
+
+      return false;
+    } catch (error) {
+      logger.error('Error tracking failed login:', error);
+      return false; // Don't block user if tracking fails
     }
-
-    return false;
   }
 
   // Clear failed login attempts
   async clearFailedAttempts(identifier) {
-    const key = `failed_attempts:${identifier}`;
-    await redis.del(key);
+    try {
+      const key = `failed_attempts:${identifier}`;
+      await redis.del(key);
+      return true;
+    } catch (error) {
+      logger.error('Error clearing failed attempts:', error);
+      return false;
+    }
   }
 
   // Validate login attempt (Step 1 - Username/Password only)
   async validateLoginAttempt(email, password, ip) {
-    // Check if account is locked
-    if (await this.isAccountLocked(email)) {
-      throw new Error('Account is temporarily locked due to too many failed login attempts');
-    }
-
-    // Find user
-    const user = await User.findByEmail(email);
-    if (!user) {
-      await this.trackFailedLogin(email, ip);
-      throw new Error('Invalid email or password');
-    }
-
-    // Check if account is active
-    if (!user.is_active) {
-      throw new Error('Account is deactivated');
-    }
-
-    // Check if email is verified
-    if (!user.email_verified) {
-      throw new Error('Please verify your email address before logging in');
-    }
-
-    // Verify password
-    const isValidPassword = await user.verifyPassword(password);
-    if (!isValidPassword) {
-      const isLocked = await this.trackFailedLogin(email, ip);
+    try {
+      // Check if account is locked
+      const isLocked = await this.isAccountLocked(email);
       if (isLocked) {
-        throw new Error('Too many failed attempts. Account is temporarily locked.');
+        const error = new Error('Account is temporarily locked due to too many failed login attempts');
+        error.code = 'ACCOUNT_LOCKED';
+        throw error;
       }
-      throw new Error('Invalid email or password');
+
+      // Find user with proper error handling
+      let user;
+      try {
+        user = await User.findByEmail(email);
+      } catch (dbError) {
+        logger.error('Database error during user lookup:', dbError);
+        const error = new Error('A system error occurred. Please try again later.');
+        error.code = 'SYSTEM_ERROR';
+        throw error;
+      }
+
+      if (!user) {
+        // Track failed attempt even for non-existent users
+        await this.trackFailedLogin(email, ip);
+        const error = new Error('Invalid email or password');
+        error.code = 'INVALID_CREDENTIALS';
+        throw error;
+      }
+
+      // Check if account is active
+      if (!user.is_active) {
+        const error = new Error('Account is deactivated');
+        error.code = 'ACCOUNT_DEACTIVATED';
+        throw error;
+      }
+
+      // Check if email is verified
+      if (!user.email_verified) {
+        const error = new Error('Please verify your email address before logging in');
+        error.code = 'EMAIL_NOT_VERIFIED';
+        throw error;
+      }
+
+      // Verify password with proper error handling
+      let isValidPassword;
+      try {
+        isValidPassword = await user.verifyPassword(password);
+      } catch (verifyError) {
+        logger.error('Error verifying password:', verifyError);
+        const error = new Error('Authentication error. Please try again.');
+        error.code = 'AUTH_ERROR';
+        throw error;
+      }
+
+      if (!isValidPassword) {
+        const isLocked = await this.trackFailedLogin(email, ip);
+        if (isLocked) {
+          const error = new Error('Too many failed attempts. Account is temporarily locked.');
+          error.code = 'ACCOUNT_LOCKED_NOW';
+          throw error;
+        }
+        const error = new Error('Invalid email or password');
+        error.code = 'INVALID_CREDENTIALS';
+        throw error;
+      }
+
+      // Clear failed attempts on successful password verification
+      await this.clearFailedAttempts(email);
+
+      return user;
+    } catch (error) {
+      // Re-throw known errors
+      if (error.code) {
+        throw error;
+      }
+      
+      // Handle unknown errors
+      logger.error('Unexpected error in validateLoginAttempt:', error);
+      const unknownError = new Error('An unexpected error occurred. Please try again.');
+      unknownError.code = 'UNKNOWN_ERROR';
+      throw unknownError;
     }
-
-    // Clear failed attempts on successful password verification
-    await this.clearFailedAttempts(email);
-
-    return user;
   }
 
   // Store OTP session data
   async storeOTPSession(userId, email, otp, sessionToken) {
-    const sessionData = {
-      userId,
-      email,
-      otp,
-      attempts: 0,
-      maxAttempts: 3,
-      resendCount: 0,
-      maxResends: 3,
-      createdAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + this.otpValidityDuration * 1000).toISOString()
-    };
+    try {
+      const sessionData = {
+        userId,
+        email,
+        otp,
+        attempts: 0,
+        maxAttempts: 3,
+        resendCount: 0,
+        maxResends: 3,
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + this.otpValidityDuration * 1000).toISOString()
+      };
 
-    await redis.set(`otp:${sessionToken}`, JSON.stringify(sessionData), this.otpValidityDuration);
-    return sessionData;
+      await redis.set(`otp:${sessionToken}`, JSON.stringify(sessionData), this.otpValidityDuration);
+      return sessionData;
+    } catch (error) {
+      logger.error('Error storing OTP session:', error);
+      const storeError = new Error('Failed to store verification session');
+      storeError.code = 'OTP_STORE_ERROR';
+      throw storeError;
+    }
   }
 
   // Validate OTP
   async validateOTP(sessionToken, inputOTP) {
-    const sessionDataString = await redis.get(`otp:${sessionToken}`);
-    if (!sessionDataString) {
-      throw new Error('Invalid or expired verification session');
-    }
+    try {
+      const sessionDataString = await redis.get(`otp:${sessionToken}`);
+      if (!sessionDataString) {
+        const error = new Error('Invalid or expired verification session');
+        error.code = 'INVALID_OTP_SESSION';
+        throw error;
+      }
 
-    const sessionData = JSON.parse(sessionDataString);
+      const sessionData = JSON.parse(sessionDataString);
 
-    // Check if max attempts exceeded
-    if (sessionData.attempts >= sessionData.maxAttempts) {
+      // Check if max attempts exceeded
+      if (sessionData.attempts >= sessionData.maxAttempts) {
+        await redis.del(`otp:${sessionToken}`);
+        const error = new Error('Maximum verification attempts exceeded. Please request a new code.');
+        error.code = 'MAX_OTP_ATTEMPTS';
+        throw error;
+      }
+
+      // Check if OTP matches
+      if (sessionData.otp !== inputOTP.toString()) {
+        sessionData.attempts += 1;
+        await redis.set(`otp:${sessionToken}`, JSON.stringify(sessionData), this.otpValidityDuration);
+        
+        const remainingAttempts = sessionData.maxAttempts - sessionData.attempts;
+        const error = new Error(`Invalid verification code. ${remainingAttempts} attempts remaining.`);
+        error.code = 'INVALID_OTP';
+        error.remainingAttempts = remainingAttempts;
+        throw error;
+      }
+
+      // OTP is valid
       await redis.del(`otp:${sessionToken}`);
-      throw new Error('Maximum verification attempts exceeded. Please request a new code.');
-    }
-
-    // Check if OTP matches
-    if (sessionData.otp !== inputOTP.toString()) {
-      sessionData.attempts += 1;
-      await redis.set(`otp:${sessionToken}`, JSON.stringify(sessionData), this.otpValidityDuration);
+      return sessionData;
+    } catch (error) {
+      // Re-throw known errors
+      if (error.code) {
+        throw error;
+      }
       
-      const remainingAttempts = sessionData.maxAttempts - sessionData.attempts;
-      throw new Error(`Invalid verification code. ${remainingAttempts} attempts remaining.`);
+      // Handle unknown errors
+      logger.error('Unexpected error in validateOTP:', error);
+      const unknownError = new Error('OTP validation failed. Please try again.');
+      unknownError.code = 'OTP_VALIDATION_ERROR';
+      throw unknownError;
     }
-
-    // OTP is valid
-    await redis.del(`otp:${sessionToken}`);
-    return sessionData;
   }
 
   // Resend OTP
   async resendOTP(sessionToken) {
-    const sessionDataString = await redis.get(`otp:${sessionToken}`);
-    if (!sessionDataString) {
-      throw new Error('Invalid or expired verification session');
+    try {
+      const sessionDataString = await redis.get(`otp:${sessionToken}`);
+      if (!sessionDataString) {
+        const error = new Error('Invalid or expired verification session');
+        error.code = 'INVALID_OTP_SESSION';
+        throw error;
+      }
+
+      const sessionData = JSON.parse(sessionDataString);
+
+      // Check if max resends exceeded
+      if (sessionData.resendCount >= sessionData.maxResends) {
+        const error = new Error('Maximum resend attempts exceeded. Please start the login process again.');
+        error.code = 'MAX_RESENDS';
+        throw error;
+      }
+
+      // Generate new OTP
+      const newOTP = this.generateOTP();
+      
+      // Update session data
+      sessionData.otp = newOTP;
+      sessionData.attempts = 0;
+      sessionData.resendCount += 1;
+      sessionData.lastResentAt = new Date().toISOString();
+
+      await redis.set(`otp:${sessionToken}`, JSON.stringify(sessionData), this.otpValidityDuration);
+
+      return { newOTP, sessionData };
+    } catch (error) {
+      // Re-throw known errors
+      if (error.code) {
+        throw error;
+      }
+      
+      // Handle unknown errors
+      logger.error('Unexpected error in resendOTP:', error);
+      const unknownError = new Error('Failed to resend OTP. Please try again.');
+      unknownError.code = 'RESEND_ERROR';
+      throw unknownError;
     }
-
-    const sessionData = JSON.parse(sessionDataString);
-
-    // Check if max resends exceeded
-    if (sessionData.resendCount >= sessionData.maxResends) {
-      throw new Error('Maximum resend attempts exceeded. Please start the login process again.');
-    }
-
-    // Generate new OTP
-    const newOTP = this.generateOTP();
-    
-    // Update session data
-    sessionData.otp = newOTP;
-    sessionData.attempts = 0;
-    sessionData.resendCount += 1;
-    sessionData.lastResentAt = new Date().toISOString();
-
-    await redis.set(`otp:${sessionToken}`, JSON.stringify(sessionData), this.otpValidityDuration);
-
-    return { newOTP, sessionData };
   }
 
   // Generate secure tokens
@@ -303,164 +414,236 @@ class AuthService {
 
   // Session management
   async createSession(userId, deviceInfo = {}) {
-    const sessionId = this.generateSecureToken();
-    const sessionData = {
-      userId,
-      createdAt: new Date().toISOString(),
-      lastActivity: new Date().toISOString(),
-      deviceInfo: {
-        userAgent: deviceInfo.userAgent || 'unknown',
-        ip: deviceInfo.ip || 'unknown',
-        location: deviceInfo.location || 'unknown'
-      }
-    };
+    try {
+      const sessionId = this.generateSecureToken();
+      const sessionData = {
+        userId,
+        createdAt: new Date().toISOString(),
+        lastActivity: new Date().toISOString(),
+        deviceInfo: {
+          userAgent: deviceInfo.userAgent || 'unknown',
+          ip: deviceInfo.ip || 'unknown',
+          location: deviceInfo.location || 'unknown'
+        }
+      };
 
-    await redis.setSession(sessionId, sessionData, 24 * 60 * 60); // 24 hours
-    return sessionId;
+      await redis.setSession(sessionId, sessionData, 24 * 60 * 60); // 24 hours
+      return sessionId;
+    } catch (error) {
+      logger.error('Error creating session:', error);
+      return null;
+    }
   }
 
   // Validate session
   async validateSession(sessionId) {
-    const sessionData = await redis.getSession(sessionId);
-    if (!sessionData) {
+    try {
+      const sessionData = await redis.getSession(sessionId);
+      if (!sessionData) {
+        return null;
+      }
+
+      // Update last activity
+      sessionData.lastActivity = new Date().toISOString();
+      await redis.setSession(sessionId, sessionData, 24 * 60 * 60);
+
+      return sessionData;
+    } catch (error) {
+      logger.error('Error validating session:', error);
       return null;
     }
-
-    // Update last activity
-    sessionData.lastActivity = new Date().toISOString();
-    await redis.setSession(sessionId, sessionData, 24 * 60 * 60);
-
-    return sessionData;
   }
 
   // Revoke session
   async revokeSession(sessionId) {
-    await redis.deleteSession(sessionId);
+    try {
+      await redis.deleteSession(sessionId);
+      return true;
+    } catch (error) {
+      logger.error('Error revoking session:', error);
+      return false;
+    }
   }
 
   // Get user sessions
   async getUserSessions(userId) {
-    // This is a simplified implementation
-    // In a real app, you'd maintain a user-to-sessions mapping
-    const sessions = [];
-    // Implementation would depend on your session storage strategy
-    return sessions;
+    try {
+      // This is a simplified implementation
+      // In a real app, you'd maintain a user-to-sessions mapping
+      const sessions = [];
+      // Implementation would depend on your session storage strategy
+      return sessions;
+    } catch (error) {
+      logger.error('Error getting user sessions:', error);
+      return [];
+    }
   }
 
   // Check for suspicious activity
   detectSuspiciousActivity(user, currentRequest) {
-    const suspiciousIndicators = [];
+    try {
+      const suspiciousIndicators = [];
 
-    // Check for unusual login location
-    // (You'd need to implement geolocation for this)
+      // Check for unusual login location
+      // (You'd need to implement geolocation for this)
 
-    // Check for unusual login time
-    const currentHour = new Date().getHours();
-    if (currentHour < 6 || currentHour > 23) {
-      suspiciousIndicators.push('unusual_time');
+      // Check for unusual login time
+      const currentHour = new Date().getHours();
+      if (currentHour < 6 || currentHour > 23) {
+        suspiciousIndicators.push('unusual_time');
+      }
+
+      // Check for multiple rapid login attempts
+      // (This would require tracking recent login patterns)
+
+      return {
+        isSuspicious: suspiciousIndicators.length > 0,
+        indicators: suspiciousIndicators,
+        riskLevel: suspiciousIndicators.length > 2 ? 'high' : 
+                   suspiciousIndicators.length > 0 ? 'medium' : 'low'
+      };
+    } catch (error) {
+      logger.error('Error detecting suspicious activity:', error);
+      return {
+        isSuspicious: false,
+        indicators: [],
+        riskLevel: 'low'
+      };
     }
-
-    // Check for multiple rapid login attempts
-    // (This would require tracking recent login patterns)
-
-    return {
-      isSuspicious: suspiciousIndicators.length > 0,
-      indicators: suspiciousIndicators,
-      riskLevel: suspiciousIndicators.length > 2 ? 'high' : 
-                 suspiciousIndicators.length > 0 ? 'medium' : 'low'
-    };
   }
 
   // Password reset flow
   async initiatePasswordReset(email) {
-    const user = await User.findByEmail(email);
-    if (!user) {
-      // Don't reveal if email exists or not
-      return { success: true };
+    try {
+      const user = await User.findByEmail(email);
+      if (!user) {
+        // Don't reveal if email exists or not
+        return { success: true };
+      }
+
+      const resetToken = await user.generateResetToken();
+      
+      // Store additional reset data
+      await redis.set(`reset_meta:${resetToken}`, {
+        userId: user.id,
+        email: user.email,
+        requestTime: new Date().toISOString()
+      }, 10 * 60); // 10 minutes
+
+      return { success: true, token: resetToken };
+    } catch (error) {
+      logger.error('Error initiating password reset:', error);
+      return { success: false, error: 'Password reset failed' };
     }
-
-    const resetToken = await user.generateResetToken();
-    
-    // Store additional reset data
-    await redis.set(`reset_meta:${resetToken}`, {
-      userId: user.id,
-      email: user.email,
-      requestTime: new Date().toISOString()
-    }, 10 * 60); // 10 minutes
-
-    return { success: true, token: resetToken };
   }
 
   // Validate reset token
   async validateResetToken(token) {
-    const user = await User.findByResetToken(token);
-    if (!user) {
+    try {
+      const user = await User.findByResetToken(token);
+      if (!user) {
+        return null;
+      }
+
+      const resetMeta = await redis.get(`reset_meta:${token}`);
+      return { user, meta: resetMeta };
+    } catch (error) {
+      logger.error('Error validating reset token:', error);
       return null;
     }
-
-    const resetMeta = await redis.get(`reset_meta:${token}`);
-    return { user, meta: resetMeta };
   }
 
   // Complete password reset
   async completePasswordReset(token, newPassword) {
-    const validation = await this.validateResetToken(token);
-    if (!validation) {
-      throw new Error('Invalid or expired reset token');
+    try {
+      const validation = await this.validateResetToken(token);
+      if (!validation) {
+        const error = new Error('Invalid or expired reset token');
+        error.code = 'INVALID_RESET_TOKEN';
+        throw error;
+      }
+
+      const { user } = validation;
+      
+      // Validate new password
+      const passwordValidation = this.validatePasswordStrength(newPassword);
+      if (!passwordValidation.isValid) {
+        const error = new Error('Password does not meet requirements: ' + passwordValidation.issues.join(', '));
+        error.code = 'WEAK_PASSWORD';
+        throw error;
+      }
+
+      // Update password
+      await user.updatePassword(newPassword);
+      await user.update({ 
+        reset_token: null, 
+        reset_token_expires: null 
+      });
+
+      // Clean up reset metadata
+      await redis.del(`reset_meta:${token}`);
+
+      return { success: true };
+    } catch (error) {
+      // Re-throw known errors
+      if (error.code) {
+        throw error;
+      }
+      
+      // Handle unknown errors
+      logger.error('Unexpected error in completePasswordReset:', error);
+      const unknownError = new Error('Password reset failed. Please try again.');
+      unknownError.code = 'RESET_ERROR';
+      throw unknownError;
     }
-
-    const { user } = validation;
-    
-    // Validate new password
-    const passwordValidation = this.validatePasswordStrength(newPassword);
-    if (!passwordValidation.isValid) {
-      throw new Error('Password does not meet requirements: ' + passwordValidation.issues.join(', '));
-    }
-
-    // Update password
-    await user.updatePassword(newPassword);
-    await user.update({ 
-      reset_token: null, 
-      reset_token_expires: null 
-    });
-
-    // Clean up reset metadata
-    await redis.del(`reset_meta:${token}`);
-
-    return { success: true };
   }
 
   // Get OTP session status
   async getOTPSessionStatus(sessionToken) {
-    const sessionDataString = await redis.get(`otp:${sessionToken}`);
-    if (!sessionDataString) {
+    try {
+      const sessionDataString = await redis.get(`otp:${sessionToken}`);
+      if (!sessionDataString) {
+        return null;
+      }
+
+      const sessionData = JSON.parse(sessionDataString);
+      const now = new Date();
+      const expiresAt = new Date(sessionData.expiresAt);
+      const timeRemaining = Math.max(0, Math.floor((expiresAt - now) / 1000));
+
+      return {
+        isValid: timeRemaining > 0,
+        timeRemaining,
+        attemptsRemaining: sessionData.maxAttempts - sessionData.attempts,
+        resendsRemaining: sessionData.maxResends - sessionData.resendCount,
+        email: sessionData.email
+      };
+    } catch (error) {
+      logger.error('Error getting OTP session status:', error);
       return null;
     }
-
-    const sessionData = JSON.parse(sessionDataString);
-    const now = new Date();
-    const expiresAt = new Date(sessionData.expiresAt);
-    const timeRemaining = Math.max(0, Math.floor((expiresAt - now) / 1000));
-
-    return {
-      isValid: timeRemaining > 0,
-      timeRemaining,
-      attemptsRemaining: sessionData.maxAttempts - sessionData.attempts,
-      resendsRemaining: sessionData.maxResends - sessionData.resendCount,
-      email: sessionData.email
-    };
   }
 
   // Clean expired OTP sessions
   async cleanExpiredOTPSessions() {
-    // This would be called by a cron job
-    // Implementation depends on Redis pattern matching capabilities
-    logger.info('Cleaning expired OTP sessions');
+    try {
+      // This would be called by a cron job
+      // Implementation depends on Redis pattern matching capabilities
+      logger.info('Cleaning expired OTP sessions');
+      return true;
+    } catch (error) {
+      logger.error('Error cleaning expired OTP sessions:', error);
+      return false;
+    }
   }
 
   // Log security events
   logSecurityEvent(eventType, details) {
-    logger.security[eventType] && logger.security[eventType](details);
+    try {
+      logger.info(`Security Event: ${eventType}`, details);
+    } catch (error) {
+      logger.error('Error logging security event:', error);
+    }
   }
 }
 
